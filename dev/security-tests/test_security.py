@@ -158,10 +158,13 @@ class Hardening(unittest.TestCase):
         self.assertEqual(a.headers["Cache-Control"], "no-store")
         self.assertNotIn("Content-Security-Policy", c.get("/app.js", environ_base=remote("198.51.100.9")).headers)
 
-    def test_oversized_bodies_are_refused(self):
+    def test_oversized_bodies_are_never_accepted(self):
         mod, _ = load_app()
-        r = mod.app.test_client().post("/api/login", data=b"x" * 300000, content_type="application/json", environ_base=remote("198.51.100.9"))
-        self.assertEqual(r.status_code, 413)
+        c = mod.app.test_client()
+        big = json.dumps({"password": PW, "pad": "x" * 300000}).encode()      # correct password, but a body over the 256 KB cap
+        r = c.post("/api/login", data=big, content_type="application/json", environ_base=remote("198.51.100.9"))
+        self.assertEqual(r.status_code, 413)        # enforced by the app itself, so Flask 2.x (Debian 12) behaves like Flask 3
+        self.assertFalse(c.get("/api/me", environ_base=remote("198.51.100.9")).get_json()["auth"])
 
     def test_builtin_checks_are_public_services_only(self):
         mod, _ = load_app()

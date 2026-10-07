@@ -2024,6 +2024,14 @@ def report():
 
 # ---- static PWA ----------------------------------------------------------
 
+@app.before_request
+def limit_body_size():
+    """Enforce the request-size cap ourselves: Flask 2.x (Debian 12) ignores MAX_CONTENT_LENGTH for JSON bodies."""
+    cl = request.content_length
+    if cl is not None and cl > app.config["MAX_CONTENT_LENGTH"]:
+        return jsonify({"error": "request too large"}), 413
+
+
 @app.after_request
 def secure_headers(resp):
     h = resp.headers
