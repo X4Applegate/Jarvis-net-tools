@@ -177,8 +177,9 @@ class Hardening(unittest.TestCase):
         for first in calls:
             self.assertIn(first.strip(), allowed, "raw sudo call: " + first)
 
+    @unittest.skipUnless(os.path.exists(os.path.join(ROOT, "install", "install-pi.sh")), "installer is not part of this tree")
     def test_installer_sudoers_is_minimal(self):
-        inst = open(os.path.join(APP_DIR, "install.sh")).read()
+        inst = open(os.path.join(ROOT, "install", "install-pi.sh")).read()
         line = re.search(r"nettools ALL=\(root\) NOPASSWD: (.+)", inst).group(1)
         for bad in ("nmap", "tcpdump", "timeout", "bin/ip", "ethtool", "arp-scan", "lldpcli", "/iw"):
             self.assertNotIn(bad, line)

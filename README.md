@@ -68,7 +68,7 @@ See [`SECURITY.md`](SECURITY.md) for the model, known limits and how to report a
 ## Layout
 
 ```
-app/            Flask backend (app.py), auth helpers, network monitor, installer helpers, front end in app/static/
+app/            Flask backend (app.py), auth helpers, network monitor, front end in app/static/
 scripts/        root helper (jarvis-priv), wifi-clear, token tool, deploy helpers
 splash/ systemd/ udev   optional setup hotspot, captive page and service units (placeholders, not for copying as-is)
 cockpit-nettools/       optional Cockpit page
