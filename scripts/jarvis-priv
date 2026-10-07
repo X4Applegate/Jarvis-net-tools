@@ -1,0 +1,122 @@
+#!/usr/bin/python3 -I
+"""jarvis-priv - the root-side helper for Jarvis Net Tools.
+
+Install as /usr/local/bin/jarvis-priv, owner root, mode 755 (NOT writable by the app user). The app user ('nettools')
+may run this through sudo instead of raw nmap / arp-scan / tcpdump / timeout / lldpcli / ss, because every one of those
+can execute arbitrary commands or write arbitrary files as root when given the right arguments.
+
+This helper accepts only the exact operations the app needs and validates every argument (no option injection, no NSE
+scripts other than one fixed discovery script, no output files, interface names and targets must look like interface
+names and targets). Anything else is refused with exit code 64.
+
+  jarvis-priv nmap <validated nmap arguments...>   TCP/host scans, plus the one DHCP-discovery script
+  jarvis-priv arp-scan <iface>                     ARP sweep of the local network
+  jarvis-priv ss                                   listening sockets (read only)
+  jarvis-priv lldp <iface>                         LLDP/CDP neighbour summary
+  jarvis-priv vlan-sniff <iface>                   6 s look for 802.1Q-tagged frames
+"""
+import os
+import re
+import sys
+
+IFACE = re.compile(r"^[a-z][a-z0-9_.-]{0,14}$")
+HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.:-]{0,253}$")
+CIDR4 = re.compile(r"^(\d{1,3}\.){3}\d{1,3}(/\d{1,2})?$")
+PORTS = re.compile(r"^\d{1,5}([,-]\d{1,5}){0,63}$")
+DIGITS = re.compile(r"^\d{1,4}$")
+DHCP_ARGS = re.compile(r"^broadcast-dhcp-discover\.timeout=\d{1,3}$")
+
+
+class Refused(Exception):
+    pass
+
+
+def _iface(v):
+    if not IFACE.match(v or ""):
+        raise Refused("bad interface name")
+    return v
+
+
+def nmap_args(args):
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+
+        def val():
+            if i + 1 >= len(args):
+                raise Refused("missing value after " + a)
+            return args[i + 1]
+        if a in ("-Pn", "-T4", "--open", "-sT"):
+            out.append(a)
+        elif a == "-p":
+            v = val()
+            if not PORTS.match(v):
+                raise Refused("bad port list")
+            out += [a, v]
+            i += 1
+        elif a == "--top-ports":
+            v = val()
+            if not DIGITS.match(v):
+                raise Refused("bad --top-ports")
+            out += [a, v]
+            i += 1
+        elif a == "-oG":
+            if val() != "-":
+                raise Refused("output files are not allowed")
+            out += [a, "-"]
+            i += 1
+        elif a == "-e":
+            out += [a, _iface(val())]
+            i += 1
+        elif a == "--script":
+            if val() != "broadcast-dhcp-discover":
+                raise Refused("only broadcast-dhcp-discover may be run")
+            out += [a, "broadcast-dhcp-discover"]
+            i += 1
+        elif a == "--script-args":
+            v = val()
+            if not DHCP_ARGS.match(v):
+                raise Refused("bad --script-args")
+            out += [a, v]
+            i += 1
+        elif not a.startswith("-") and (CIDR4.match(a) or HOST.match(a)):
+            out.append(a)                                    # a scan target
+        else:
+            raise Refused("argument not allowed: " + a[:40])
+        i += 1
+    if not out:
+        raise Refused("nothing to do")
+    return out
+
+
+def build(argv):
+    """argv (without the program name) -> (command list, working directory or None). Raises Refused."""
+    if not argv:
+        raise Refused("usage: jarvis-priv nmap|arp-scan|ss|lldp|vlan-sniff ...")
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "nmap":
+        return ["/usr/bin/nmap"] + nmap_args(rest), None
+    if cmd == "arp-scan" and len(rest) == 1:
+        return ["/usr/sbin/arp-scan", "--localnet", "--interface=" + _iface(rest[0])], "/usr/share/arp-scan"
+    if cmd == "ss" and not rest:
+        return ["/usr/bin/ss", "-tulpn"], None
+    if cmd == "lldp" and len(rest) == 1:
+        return ["/usr/sbin/lldpcli", "show", "neighbors", "ports", _iface(rest[0]), "summary"], None
+    if cmd == "vlan-sniff" and len(rest) == 1:
+        return ["/usr/bin/timeout", "6", "/usr/bin/tcpdump", "-i", _iface(rest[0]), "-nn", "-e", "-c", "40", "vlan"], None
+    raise Refused("unknown or malformed command")
+
+
+def main():
+    try:
+        cmd, cwd = build(sys.argv[1:])
+    except Refused as e:
+        sys.stderr.write("jarvis-priv: refused (%s)\n" % e)
+        return 64
+    if cwd:
+        os.chdir(cwd)
+    os.execv(cmd[0], cmd)                                    # replace this process: signals / exit codes pass straight through
+
+
+if __name__ == "__main__":
+    sys.exit(main())

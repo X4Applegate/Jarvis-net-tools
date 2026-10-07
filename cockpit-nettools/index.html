@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Net Tools</title>
+<script src="../base1/cockpit.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h2>Net Tools</h2>
+  <div class="grid">
+    <button id="btn-wifi">WiFi Status</button>
+    <button id="btn-scan">Find Devices on LAN</button>
+    <button id="btn-ports">Open Ports (this Pi)</button>
+    <button id="btn-ping">Ping Gateway</button>
+    <button id="btn-bw">Bandwidth Right Now</button>
+    <button id="btn-mtr">Path to Internet (8.8.8.8)</button>
+    <button id="btn-speed">Speed Test (~20s)</button>
+    <button id="btn-wifiscan" class="accent">Scan All WiFi (Alfa)</button>
+    <button id="btn-chan" class="accent">Channel Analyzer (Alfa)</button>
+    <button id="btn-monitor" class="accent">Monitor Capture 30s (Alfa)</button>
+  </div>
+
+  <h3>WiFi Network</h3>
+  <div class="search-row">
+    <span id="wifi-current">Currently connected: (checking...)</span>
+  </div>
+  <div class="search-row wifi-switch-row">
+    <select id="wifi-select"><option>Loading saved networks...</option></select>
+    <button id="btn-wifi-connect">Connect Saved</button>
+    <button id="btn-wifi-refresh" class="util">Refresh List</button>
+  </div>
+  <div class="search-row wifi-switch-row">
+    <select id="scan-select"><option>Hit "Scan" to find networks</option></select>
+    <input type="password" id="scan-pass" placeholder="WiFi password (blank = open)">
+    <button id="btn-wifi-rescan" class="util">Scan</button>
+    <button id="btn-wifi-join" class="accent">Join</button>
+  </div>
+
+  <h3>Admin Access</h3>
+  <div class="grid">
+    <button id="btn-find-admin" class="util">Find Admin Pages on LAN</button>
+  </div>
+  <div id="admin-links" class="admin-links">Loading quick links...</div>
+
+  <h3>Run Against a Target</h3>
+  <div class="search-row">
+    <input type="text" id="target-input" placeholder="hostname or IP, e.g. 192.168.0.1 or google.com">
+  </div>
+  <div class="grid">
+    <button id="btn-ping-custom">Ping</button>
+    <button id="btn-portscan-custom">Port Scan</button>
+    <button id="btn-dns-custom">DNS Lookup</button>
+    <button id="btn-traceroute-custom">Traceroute</button>
+  </div>
+
+  <h3>More Tools</h3>
+  <div class="grid">
+    <button id="btn-pubip" class="util">Public IP &amp; ISP</button>
+    <button id="btn-dns" class="util">DNS Check</button>
+    <button id="btn-signal" class="accent">Live Signal Meter</button>
+    <button id="btn-pingmon" class="accent">Ping Monitor</button>
+    <button id="btn-devwatch" class="accent">Device Watch</button>
+  </div>
+  <div class="search-row wifi-switch-row">
+    <input type="text" id="wol-mac" placeholder="MAC for Wake-on-LAN (AA:BB:CC:DD:EE:FF)">
+    <button id="btn-wol" class="util">Wake Device</button>
+  </div>
+
+  <div class="grid">
+    <button id="btn-history" class="util">View History</button>
+    <button id="btn-wifi-clear" class="util">Clear Visited WiFi</button>
+  </div>
+
+  <h3>Site Diagnostics</h3>
+  <div class="grid">
+    <button id="nt-monitor" class="accent">Network Monitor (24h)</button>
+    <button id="nt-speedhist" class="accent">Speed History</button>
+    <button id="nt-dhcp" class="accent">Rogue DHCP Check</button>
+    <button id="nt-services" class="accent">Service / POS Check</button>
+    <button id="nt-aps" class="accent">APs &amp; Roaming</button>
+    <button id="nt-jack" class="accent">Ethernet Jack Test</button>
+    <button id="nt-iperf" class="util">LAN Speed (iperf3 → target)</button>
+    <button id="nt-report" class="util">Site Report (text)</button>
+  </div>
+  <p class="note">These run on the same engine as the phone app (jarvispi). The Network Monitor and auto speed tests keep logging in the background 24/7.</p>
+
+  <h3>Power</h3>
+  <div class="grid">
+    <button id="btn-shutdown" class="danger">⏻ Shut Down Pi (safe)</button>
+  </div>
+
+  <div id="status"></div>
+  <pre id="output">Pick a button above.</pre>
+
+<script src="main.js"></script>
+</body>
+</html>

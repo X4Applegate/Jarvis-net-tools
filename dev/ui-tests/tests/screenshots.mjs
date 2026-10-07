@@ -1,0 +1,20 @@
+// Generates the README screenshots from the mock API (all data fictional). Output: $SHOTS_DIR (default ./shots)
+import { chromium } from "playwright-core";
+const out = process.env.SHOTS_DIR || "./shots";
+const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined, args: ["--no-sandbox"] });
+const ctx = await browser.newContext({ viewport: { width: 390, height: 780 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true, serviceWorkers: "block" });
+const page = await ctx.newPage();
+const shot = (n) => page.screenshot({ path: `${out}/${n}.png` });
+const tab = async (pg) => { await page.locator(`#tabs button[data-page=${pg}]`).tap(); await page.waitForTimeout(700); };
+await page.goto("http://127.0.0.1:8099/index.html#home"); await page.waitForTimeout(2200);
+await shot("01-info");
+await tab("wifi"); await page.waitForTimeout(1600); await shot("02-signal");
+await tab("tools"); await page.fill("#target", "example.com");
+await page.locator("#tool-seg button[data-tool=trace]").tap(); await page.locator("#tool-start").tap(); await page.waitForTimeout(6200); await shot("03-route");
+await page.locator("#tool-seg button[data-tool=ports]").tap(); await page.locator("#tool-start").tap(); await page.waitForTimeout(3800); await shot("04-ports");
+await tab("monitor"); await page.waitForTimeout(1500);
+await page.locator("#btn-speed2").tap(); await page.waitForTimeout(1900); await shot("05-speed-live");
+await page.waitForTimeout(4200); await shot("06-speed-done");
+await tab("network"); await shot("07-lan");
+await browser.close();
+console.log("screenshots written to", out);

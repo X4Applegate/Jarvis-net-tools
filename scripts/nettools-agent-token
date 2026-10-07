@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Manage agent tokens for the Jarvis Net Tools API (run as root on the Pi).
+
+  nettools-agent-token add <id> <read|act|control>   create a token; it is written to /root/agent-tokens/<id>.token (0600),
+                                             NOT printed. Read it yourself in your own terminal and hand it over.
+  nettools-agent-token list                  ids, scopes, created
+  nettools-agent-token revoke <id>           delete a token (takes effect immediately)
+  nettools-agent-token log [N]               last N API calls made with tokens
+Only a SHA-256 hash of each token is stored on the Pi.
+"""
+import hashlib, json, os, pwd, re, secrets, sys, time
+PATH = "/var/lib/jarvis-nettools/agent-tokens.json"; LOG = "/var/lib/jarvis-nettools/agent-access.log"; OUT = "/root/agent-tokens"
+def load():
+    try: return json.load(open(PATH))
+    except Exception: return {"tokens": []}
+def save(d):
+    tmp = PATH + ".tmp"; open(tmp, "w").write(json.dumps(d, indent=1)); os.chmod(tmp, 0o600)
+    u = pwd.getpwnam("nettools"); os.chown(tmp, u.pw_uid, u.pw_gid); os.replace(tmp, PATH)
+a = sys.argv[1:]
+if os.geteuid() != 0: sys.exit("run as root")
+if a[:1] == ["add"] and len(a) == 3 and a[2] in ("read", "act", "control") and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", a[1]):
+    d = load()
+    if any(t["id"] == a[1] for t in d["tokens"]): sys.exit("id already exists - revoke it first")
+    tok = "jpi_" + secrets.token_urlsafe(32)
+    d["tokens"].append({"id": a[1], "scope": a[2], "hash": hashlib.sha256(tok.encode()).hexdigest(), "created": time.strftime("%Y-%m-%d %H:%M")})
+    save(d); os.makedirs(OUT, mode=0o700, exist_ok=True)
+    fd = os.open(f"{OUT}/{a[1]}.token", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, (tok + "\n").encode()); os.close(fd)
+    print(f"created '{a[1]}' ({a[2]}). token saved to {OUT}/{a[1]}.token (not shown here)")
+elif a[:1] == ["list"]:
+    for t in load()["tokens"]: print(f"{t['id']:<20} {t['scope']:<5} created {t['created']}")
+elif a[:1] == ["revoke"] and len(a) == 2:
+    d = load(); n = len(d["tokens"]); d["tokens"] = [t for t in d["tokens"] if t["id"] != a[1]]; save(d)
+    try: os.remove(f"{OUT}/{a[1]}.token")
+    except OSError: pass
+    print("revoked" if len(d["tokens"]) < n else "no such id")
+elif a[:1] == ["log"]:
+    os.system(f"tail -n {int(a[1]) if len(a) > 1 and a[1].isdigit() else 30} {LOG} 2>/dev/null")
+else: print(__doc__)

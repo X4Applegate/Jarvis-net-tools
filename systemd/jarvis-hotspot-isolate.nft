@@ -1,0 +1,10 @@
+# Jarvis Pi: JarvisPi-Manage (wlan0) is a local setup network only. Block anything the hotspot
+# clients try to send THROUGH the Pi to other networks. Phone -> Pi (10.42.0.1 setup page, DNS,
+# DHCP) is not forwarded traffic, so it keeps working. Priority -10 runs before NetworkManager's
+# own "shared" NAT table, so this wins. Remove: systemctl disable --now jarvis-hotspot-isolate
+table inet jarvis_isolate {
+  chain forward {
+    type filter hook forward priority -10; policy accept;
+    iifname "wlan0" oifname != "wlan0" counter drop comment "hotspot clients: no internet via the Pi"
+  }
+}

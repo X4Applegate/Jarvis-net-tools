@@ -1,0 +1,5 @@
+# Never commit runtime config (holds the app password, secret key, ipinfo token)
+config.json
+*.pyc
+__pycache__/
+*.pcap

@@ -1,0 +1,46 @@
+Jarvis Net Tools - Source-Available License (View Only), version 1.0
+
+Copyright (c) 2026 Richard Applegate (GitHub: X4Applegate). All rights reserved.
+
+This is NOT an open-source license. The source code is published so that people can read it
+and learn from how it works. It is not published so that it can be copied or reused.
+
+1. WHAT YOU MAY DO
+   You may view and read the files in this repository, and download or clone them to read on
+   your own computer, for personal, non-commercial learning and curiosity. (GitHub's Terms of
+   Service also let you view and fork public repositories inside GitHub; this license does not
+   take that away, but it grants no further rights to the code in any fork or copy.)
+
+2. WHAT YOU MAY NOT DO
+   Without the prior written permission of the copyright holder you may not:
+   (a) copy, reuse, or incorporate any part of the code, documentation, designs, screenshots or
+       other material into any other project, product, document or service;
+   (b) modify the material or create derivative works from it;
+   (c) distribute, publish, sublicense, sell, rent or otherwise make the material available to
+       anyone else, in source or any other form;
+   (d) install, deploy, host or run the software, or use it in any commercial or production
+       setting, or train or fine-tune any machine-learning model on it.
+
+3. NO TRADEMARK OR NAME RIGHTS
+   This license grants no right to use the names "Jarvis", "Jarvis Net Tools" or the copyright
+   holder's name or GitHub account name, other than to accurately say where the material came from.
+
+4. THIRD-PARTY MATERIAL
+   Some small parts come from other people under their own licenses; see NOTICE.md. Those parts
+   stay under their original licenses, which this license does not change.
+
+5. FEEDBACK
+   Bug reports, security reports and suggestions are welcome (see SECURITY.md). If you send
+   feedback, the copyright holder may use it without obligation or payment.
+
+6. NO WARRANTY, NO LIABILITY
+   THE MATERIAL IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+   BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. TO
+   THE FULLEST EXTENT PERMITTED BY LAW THE COPYRIGHT HOLDER IS NOT LIABLE FOR ANY CLAIM, DAMAGES
+   OR OTHER LIABILITY ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIAL OR ITS USE.
+
+7. TERMINATION
+   Any breach of this license ends your permission under section 1 automatically.
+
+Want to use, adapt or collaborate on this? Ask first - contact the copyright holder through the
+GitHub profile X4Applegate.

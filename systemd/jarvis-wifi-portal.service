@@ -1,0 +1,13 @@
+[Unit]
+Description=Jarvis Pi WiFi onboarding portal (raises setup AP only when offline)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/jarvis-wifi-portal.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

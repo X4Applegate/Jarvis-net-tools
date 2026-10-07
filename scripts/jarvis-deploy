@@ -1,0 +1,30 @@
+#!/bin/bash
+# jarvis-deploy — copy staged Jarvis Pi files into their live locations and restart services.
+# Staging dir: /tmp/jarvis-stage/{app.py,nt_auth.py,netmon.py,splash.py,jarvis-priv,static/,cockpit/,wifi-clear}
+# Only this fixed set of destinations is touched; no arbitrary paths, no package installs.
+set -euo pipefail
+S=/tmp/jarvis-stage
+[ -d "$S" ] || { echo "nothing staged in $S"; exit 1; }
+chg_app=0; chg_mon=0; chg_splash=0; chg_cockpit=0
+[ -f "$S/app.py" ]    && { install -o nettools -g nettools -m 644 "$S/app.py"    /opt/jarvis-nettools/app.py;    echo "app.py";    chg_app=1; }
+[ -f "$S/nt_auth.py" ] && { install -o nettools -g nettools -m 644 "$S/nt_auth.py" /opt/jarvis-nettools/nt_auth.py; echo "nt_auth.py"; chg_app=1; }
+[ -f "$S/jarvis-priv" ] && { install -o root -g root -m 755 "$S/jarvis-priv" /usr/local/bin/jarvis-priv; echo "jarvis-priv"; }
+[ -f "$S/netmon.py" ] && { install -o nettools -g nettools -m 644 "$S/netmon.py" /opt/jarvis-nettools/netmon.py; echo "netmon.py"; chg_mon=1; }
+[ -f "$S/splash.py" ] && { install -o nettools -g nettools -m 644 "$S/splash.py" /opt/jarvis-splash/splash.py;   echo "splash.py"; chg_splash=1; }
+if [ -d "$S/static" ]; then
+  rm -rf /opt/jarvis-nettools/static && cp -r "$S/static" /opt/jarvis-nettools/static
+  rm -rf /opt/jarvis-nettools/static/__pycache__; chown -R nettools:nettools /opt/jarvis-nettools/static; echo "static/"
+fi
+if [ -d "$S/cockpit" ]; then
+  for f in index.html main.js style.css manifest.json; do
+    [ -f "$S/cockpit/$f" ] && { install -o root -g root -m 644 "$S/cockpit/$f" "/usr/share/cockpit/nettools/$f"; echo "cockpit/$f"; chg_cockpit=1; }
+  done
+fi
+[ -f "$S/wifi-clear" ] && { install -o root -g root -m 755 "$S/wifi-clear" /usr/local/bin/wifi-clear; echo "wifi-clear"; }
+[ $chg_app -eq 1 ]    && systemctl restart jarvis-nettools
+[ $chg_mon -eq 1 ]    && systemctl restart jarvis-netmon
+[ $chg_splash -eq 1 ] && systemctl restart jarvis-splash
+[ $chg_cockpit -eq 1 ] && { systemctl stop 'cockpit-wsinstance-https@*' 'cockpit-session@*' 2>/dev/null || true; }
+rm -rf "$S"
+sleep 2
+echo "deployed — app=$(systemctl is-active jarvis-nettools) netmon=$(systemctl is-active jarvis-netmon) splash=$(systemctl is-active jarvis-splash)"

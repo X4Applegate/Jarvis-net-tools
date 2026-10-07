@@ -1,0 +1,21 @@
+[Unit]
+Description=Jarvis Pi background network monitor (outage logger + scheduled speed tests)
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nettools
+Group=nettools
+Environment=HOME=/opt/jarvis-nettools
+WorkingDirectory=/opt/jarvis-nettools
+ExecStart=/usr/bin/python3 /opt/jarvis-nettools/netmon.py
+Restart=always
+RestartSec=10
+Nice=10
+ProtectSystem=full
+PrivateTmp=true
+ReadWritePaths=/var/lib/jarvis-nettools
+
+[Install]
+WantedBy=multi-user.target

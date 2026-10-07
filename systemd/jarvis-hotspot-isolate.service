@@ -1,0 +1,13 @@
+[Unit]
+Description=Jarvis Pi: JarvisPi-Manage hotspot is local-only (no forwarding to other networks)
+After=network-pre.target
+Before=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/sbin/nft delete table inet jarvis_isolate 2>/dev/null; /usr/sbin/nft -f /etc/jarvis-hotspot-isolate.nft'
+ExecStop=/bin/sh -c '/usr/sbin/nft delete table inet jarvis_isolate 2>/dev/null; true'
+
+[Install]
+WantedBy=multi-user.target

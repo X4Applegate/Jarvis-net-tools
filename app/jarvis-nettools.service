@@ -1,0 +1,25 @@
+[Unit]
+Description=Jarvis Net Tools (standalone VPN-only mobile app)
+After=network-online.target wg-quick@wg0.service NetworkManager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nettools
+Group=nettools
+Environment=NETTOOLS_BIND=127.0.0.1
+# ^ the address the app listens on: your VPN address (127.0.0.1 = reachable from this Pi only)
+Environment=NETTOOLS_PORT=8092
+Environment=HOME=/opt/jarvis-nettools
+WorkingDirectory=/opt/jarvis-nettools
+ExecStart=/usr/bin/python3 /opt/jarvis-nettools/app.py
+Restart=always
+RestartSec=5
+# Hardening
+NoNewPrivileges=false
+ProtectSystem=full
+PrivateTmp=true
+ReadWritePaths=/var/lib/jarvis-nettools /etc/jarvis-nettools
+
+[Install]
+WantedBy=multi-user.target

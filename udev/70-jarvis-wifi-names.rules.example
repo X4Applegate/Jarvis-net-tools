@@ -1,0 +1,6 @@
+# Example: give the Wi-Fi adapters stable names so the tools (which assume wlan1 = the primary radio) never break.
+# Copy to /etc/udev/rules.d/70-jarvis-wifi-names.rules, replace the placeholder MAC addresses with your adapters'
+# (see `ip -br link`), then: udevadm control --reload-rules
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="aa:bb:cc:00:00:01", NAME="wlan0"   # built-in radio
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="aa:bb:cc:00:00:02", NAME="wlan1"   # primary USB radio
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="aa:bb:cc:00:00:03", NAME="wlan2"   # spare

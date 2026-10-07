@@ -1,0 +1,23 @@
+[Unit]
+Description=Jarvis Pi captive splash (WiFi onboarding page on the JarvisPi-Manage hotspot)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+User=nettools
+Group=nettools
+# Lets the unprivileged service bind port 80 on the hotspot address.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# sudo (setuid) is used for nmcli, so privileges must be allowed to escalate.
+NoNewPrivileges=false
+Environment=HOME=/opt/jarvis-splash
+WorkingDirectory=/opt/jarvis-splash
+ExecStart=/usr/bin/python3 /opt/jarvis-splash/splash.py
+Restart=always
+RestartSec=5
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+{
+  "name": "jarvis-pi-nettools-ui-tests",
+  "private": true,
+  "type": "module",
+  "description": "Mock Pi API + Playwright suites for app/static (run against the mock, nothing touches a real Pi)",
+  "scripts": {
+    "mock": "python3 mock_server.py ../../app/static 8099",
+    "test": "for t in e2e e2e-inline e2e-live e2e-live2 e2e-speed e2e-home; do echo \"== $t\"; node tests/$t.mjs || exit 1; done"
+  },
+  "devDependencies": { "playwright-core": "^1.49.0" }
+}
