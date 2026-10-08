@@ -30,6 +30,7 @@ class Power(unittest.TestCase):
         self.mod, _ = load_app()
         self.mod.HISTORY = os.path.join(tempfile.mkdtemp(prefix="nt-hist-"), "history.log")
         self.mod.MODEL_PATH = model_file(PI5)
+        self.mod.HISTORY_MARKER = os.path.join(tempfile.mkdtemp(prefix="nt-mark-"), "keep-history-once")
         self.c = self.mod.app.test_client()
         p = mock.patch.object(self.mod.subprocess, "Popen")
         self.popen = p.start()
@@ -49,6 +50,12 @@ class Power(unittest.TestCase):
         r = self.post({"action": "restart"})
         self.assertEqual(r.get_json()["action"], "restart")
         self.popen.assert_called_once_with(["sudo", "shutdown", "-r", "now"])
+
+    def test_restart_keeps_history_shutdown_does_not(self):
+        self.post({"action": "restart"})
+        self.assertTrue(os.path.exists(self.mod.HISTORY_MARKER))        # the boot service keeps the history once
+        self.post({"action": "shutdown"})
+        self.assertFalse(os.path.exists(self.mod.HISTORY_MARKER))       # next power-on starts empty
 
     def test_empty_body_still_shuts_down(self):
         # older cached app versions send {}

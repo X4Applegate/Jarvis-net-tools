@@ -1,0 +1,118 @@
+#!/usr/bin/python3 -I
+"""jarvis-history-reset - every power-on starts with an empty history, so a site report covers this visit only.
+
+Install as /usr/local/bin/jarvis-history-reset (owner root, mode 755); run by jarvis-history-reset.service as the app user.
+
+  --boot      at power-on, before the app and the monitor start: empties the history, unless the Pi was only restarted
+  --shutdown  at shutdown: a restart (reboot.target queued) leaves a one-time marker so the next boot keeps the history;
+              a power-off (poweroff.target / halt.target) removes any marker. A power cut runs nothing, so the next boot clears.
+  --now       empty it right away (same as Settings > Clear History in the app)
+
+"History" = speed tests, monitor samples and outages (netmon.db) and the tool log (history.log). Settings, saved
+devices, AP names, Wi-Fi networks, the vendor cache and the agent access log are kept.
+"""
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+
+DB_PATH = "/var/lib/jarvis-nettools/netmon.db"
+HISTORY = "/opt/jarvis-nettools/history.log"
+MARKER = "/var/lib/jarvis-nettools/keep-history-once"       # "the next boot is a restart: keep the history"
+SINCE = "/var/lib/jarvis-nettools/history-since.json"       # when (and why) the history was last emptied
+TABLES = ("speed", "samples", "events")
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def wipe(reason, db_path=None, history=None, since=None, now=time.time):
+    """Empty the history tables and the tool log; record when. Returns what was removed (rows per table)."""
+    db_path, history, since = db_path or DB_PATH, history or HISTORY, since or SINCE
+    removed = {}
+    if os.path.exists(db_path):
+        c = sqlite3.connect(db_path, timeout=30)
+        try:
+            have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            with c:
+                for t in TABLES:
+                    if t in have:
+                        removed[t] = c.execute(f"DELETE FROM {t}").rowcount
+            c.execute("VACUUM")           # really gone from the file, and the file shrinks back
+        finally:
+            c.close()
+    if os.path.exists(history):
+        with open(history, "w"):
+            pass                          # truncate in place: owner and mode stay as they are
+    tmp = since + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"ts": int(now()), "reason": reason}, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, since)
+    return removed
+
+
+def shutdown_kind(jobs=None):
+    """'restart', 'poweroff' or '' (unknown) from the jobs systemd has queued while shutting down."""
+    if jobs is None:
+        try:
+            jobs = subprocess.run(["systemctl", "list-jobs", "--no-legend", "--no-pager"], capture_output=True,
+                                  text=True, timeout=10).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+    names = {line.split()[1] for line in jobs.splitlines() if len(line.split()) > 1}
+    if names & {"reboot.target", "kexec.target", "soft-reboot.target"}:
+        return "restart"
+    if names & {"poweroff.target", "halt.target"}:
+        return "poweroff"
+    return ""
+
+
+def keep_next_boot(keep, marker=None):
+    marker = marker or MARKER
+    if keep:
+        with open(marker, "w") as f:
+            f.write("restart\n")
+    else:
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            pass
+
+
+def boot(marker=None, **kw):
+    marker = marker or MARKER
+    if os.path.exists(marker):
+        keep_next_boot(False, marker)
+        log("restarted: history kept")
+        return None
+    removed = wipe("power-on", **kw)
+    log("power-on after a power-off or power cut: history cleared %s" % (removed or "(nothing yet)"))
+    return removed
+
+
+def main(argv):
+    if argv[1:] == ["--boot"]:
+        try:
+            boot()
+        except Exception as e:            # never hold up the boot: the app starts either way
+            log(f"could not clear the history: {e!r}")
+        return 0
+    if argv[1:] == ["--shutdown"]:
+        kind = shutdown_kind()
+        if kind:
+            keep_next_boot(kind == "restart")
+        log(f"shutting down ({kind or 'kind unknown'}): next boot {'keeps' if kind == 'restart' else 'clears'} the history")
+        return 0
+    if argv[1:] == ["--now"]:
+        log("history cleared %s" % (wipe("manual") or "(nothing yet)"))
+        return 0
+    sys.stderr.write(__doc__)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,21 @@
+[Unit]
+Description=Jarvis Net Tools: start every power-on with an empty history (kept across a restart)
+# runs before the app and the monitor write anything, and (stopping in reverse order) after they have stopped;
+# After=dbus.service keeps D-Bus up for `systemctl list-jobs` when the shutdown check runs
+After=local-fs.target dbus.service
+Before=jarvis-nettools.service jarvis-netmon.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=nettools
+Group=nettools
+ExecStart=/usr/local/bin/jarvis-history-reset --boot
+ExecStop=/usr/local/bin/jarvis-history-reset --shutdown
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

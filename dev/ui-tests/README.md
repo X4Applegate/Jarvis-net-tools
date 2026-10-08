@@ -24,6 +24,7 @@ kill %1
 | `e2e-usb` | Info "USB Link" row: USB 3 green, USB 2 fallback amber + hint, USB 2-only adapter, no USB radio, live refresh, escaping, 800x480 touch screen |
 | `e2e-power` | Info header ⏻ + Settings > Power: confirm dialog (Cancel/Esc/backdrop send nothing), shut down countdown + Pi 5 vs older-Pi wake hint, restart waits for the Pi to go down and come back then reloads, "didn't restart", refused action, 800x480 touch screen |
 | `e2e-hotspot` | Settings > Setup Hotspot: Off / Auto / On (POST body, selection + aria), live status (network, fallback countdown, Turning on/off…, phones connected, service down, escaped errors), polling only while Settings is open, choice survives a reload, 800x480 touch screen |
+| `e2e-history` | Settings > Maintenance: History since (power-on / cleared by hand), Clear History Now asks first (Cancel sends nothing), clears, survives a reload, 800x480 touch screen |
 
 `tests/live.mjs <url>` is a tiny smoke check of a *deployed* app (login screen renders, no JS errors).
 

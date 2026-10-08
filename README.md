@@ -30,11 +30,12 @@ speedometer-style speed test with a bufferbloat grade. Everything is a phone-fir
 | **LAN** | Find and identify devices (ARP + port/mDNS/SSDP fingerprints), device watch, saved devices with Wake-on-LAN, rogue-DHCP check, Ethernet jack test (link, DHCP, LLDP/CDP switch and port, VLAN tags). |
 | **Tools** | **Live ping**, continuous ping monitor, **live route** (hop table), **live port scan**, DNS, iperf3 — results appear in a card right under the thing you tapped. |
 | **Speed** | A **speedometer** with an eased needle, ping/jitter/download/upload tiles, a Mbps-over-time trace, a **bufferbloat grade** (latency under load), history charts and an outage timeline. |
-| **Settings** | Site name, scheduled speed tests, **setup hotspot Off / Auto / On**, custom service checks, saved devices, password, display mode, safe shutdown. |
+| **Settings** | Site name, scheduled speed tests, **setup hotspot Off / Auto / On**, custom service checks, saved devices, password, display mode, **history since / Clear History Now**, safe shutdown. |
 
 Also: a background **network monitor** (internet / gateway / DNS samples, outage log, scheduled speed tests), a printable
 **site report**, an optional **Cockpit** page, an optional **setup hotspot with a captive page** for joining Wi-Fi from a phone
 (on **Auto** it stays off while the Pi has a network and turns itself on after 2 minutes without one),
+a **fresh history at every power-on** (a restart keeps it) so each site report covers one visit,
 and a small **agent API** (hashed, scoped bearer tokens) so other automations can read the Pi's state.
 
 ## How it is built (the interesting parts)

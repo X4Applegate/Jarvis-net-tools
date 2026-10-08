@@ -990,8 +990,22 @@ function applySettings() {
   $("set-interval").value = String(settings.speed_interval_min ?? 60);
   $("about").innerHTML = "Jarvis Net Tools v" + esc(settings.version || "?") + " · Pi: " + esc(settings.hostname || "?") + "<br>Dashboard: Cockpit on port 9090 · Hotspot: JarvisPi-Manage";
   $("set-ipinfo").innerHTML = "ipinfo token: " + (settings.ipinfo_token_set ? "<span class='nm-ok'>configured</span>" : "<span class='nm-bad'>not set</span> — run <code>sudo nettools-set-ipinfo</code> on the Pi");
+  renderHistorySince(settings.history_since);
   renderServiceChecks(); renderSavedDevices();
 }
+function renderHistorySince(h) {
+  const why = { "power-on": "power-on", manual: "cleared by hand" };
+  $("hist-since").textContent = h && h.ts ? fmtTs(h.ts) + " · " + (why[h.reason] || "cleared") : "—";
+}
+$("btn-hist-clear").onclick = async () => {
+  if (!window.confirm("Clear all history now?\n\nSpeed tests, uptime and outages and the tool results are deleted.\nSettings, saved devices and Wi-Fi networks stay.")) return;
+  try {
+    const d = await api("/api/history/clear", {});
+    if (!d.ok) { show("❌ " + (d.error || "Could not clear the history.")); return; }
+    renderHistorySince(d.history_since); settings.history_since = d.history_since;
+    show("✅ History cleared. The next site report starts from now.");
+  } catch (e) { show(e.message); }
+};
 async function loadSettings(quiet) {
   try { settings = await api("/api/settings"); applySettings(); } catch (e) { if (!quiet) show(e.message); }
 }

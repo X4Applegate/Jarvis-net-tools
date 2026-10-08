@@ -151,7 +151,7 @@ class Auth(unittest.TestCase):
         c = mod.app.test_client()
         for method, path in [("get", "/api/status"), ("post", "/api/ping/stream"), ("post", "/api/trace/stream"), ("post", "/api/portscan/stream"),
                              ("post", "/api/speedtest/stream"), ("post", "/api/wifi/join"), ("post", "/api/shutdown"), ("get", "/api/devices.csv"),
-                             ("get", "/api/hotspot"), ("post", "/api/hotspot")]:
+                             ("get", "/api/hotspot"), ("post", "/api/hotspot"), ("post", "/api/history/clear")]:
             r = getattr(c, method)(path, json={}, environ_base=remote("198.51.100.9")) if method == "post" else c.get(path, environ_base=remote("198.51.100.9"))
             self.assertEqual(r.status_code, 401, path)
 

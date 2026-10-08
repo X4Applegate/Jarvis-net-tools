@@ -13,6 +13,7 @@ def band_freq(b,ch):
 def jr(o,code=200): return code, json.dumps(o).encode()
 class H(SimpleHTTPRequestHandler):
     hs_mode="auto"   # setup hotspot mode, shared by all requests (a real Pi keeps it in a file)
+    hist_since={"ts":NOW-5400,"reason":"power-on"}   # when the history was last emptied
     def log_message(self,*a): pass
     def hotspot(self):
         return {"mode":H.hs_mode,"service":True,"ssid":"JarvisPi-Manage","active":H.hs_mode=="on","clients":0,"online":True,"fallback_in":None,"error":"","note":""}
@@ -49,7 +50,8 @@ class H(SimpleHTTPRequestHandler):
             return jr({"rows":rows})
         if path=="/api/settings":
             return jr({"ok":True,"site_name":"Demo site","speed_interval_min":60,"service_checks":[{"name":"Online ordering","type":"https","target":"https://shop.example.com"}],
-                       "saved_devices":[{"name":"Office PC","mac":"AA:BB:CC:DD:EE:01","ip":"192.168.88.50"},{"name":"Store NVR","mac":"AA:BB:CC:DD:EE:02","ip":""}],"version":"3.0","hostname":"jarvis-pi","ipinfo_token_set":True})
+                       "saved_devices":[{"name":"Office PC","mac":"AA:BB:CC:DD:EE:01","ip":"192.168.88.50"},{"name":"Store NVR","mac":"AA:BB:CC:DD:EE:02","ip":""}],"version":"3.0","hostname":"jarvis-pi","ipinfo_token_set":True,
+                       "history_since":H.hist_since})
         if path=="/api/scanall":
             return jr({"networks":[{"ch":str(c),"sig":str(s),"ssid":n,"band":("%g"%b),"freq":band_freq(b,c)} for n,b,c,s in NETS]})
         if path=="/api/wifi/saved": return jr({"profiles":["Example WiFi","ShopNet-Admin","Backup-2.4GHz","Home WiFi"]})
@@ -57,6 +59,8 @@ class H(SimpleHTTPRequestHandler):
         if path=="/api/apnames": return jr({"names":{"02:00:5E:00:00:01":"Office AP"}})
         if path=="/api/iperf/info": return jr({"server":True,"ips":["192.168.88.34"]})
         if path=="/api/shutdown": return jr({"ok":True,"action":"shutdown","power_button":True})   # mock: nothing powers off
+        if path=="/api/history/clear" and method=="POST":
+            H.hist_since={"ts":int(time.time()),"reason":"manual"}; return jr({"ok":True,"history_since":H.hist_since})
         if path=="/api/devices": return jr({"hosts":[{"ip":"192.168.88.1","name":"Omada Gateway","type":"Router","vendor":"TP-Link","mac":"02:00:5E:00:00:03","info":""},{"ip":"192.168.88.50","name":"Office PC","type":"Laptop","vendor":"Intel Corporate","mac":"AA:BB:CC:DD:EE:01","info":""}]})
         return jr({"ok":True,"output":"(mock) %s %s\nPING 1.1.1.1: 5 packets transmitted, 5 received, 0%% packet loss\nrtt min/avg/max = 14.2/17.9/22.0 ms"%(method,path)})
     def _send(self,code,body,ct="application/json"):

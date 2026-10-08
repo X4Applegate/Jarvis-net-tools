@@ -1644,8 +1644,67 @@ def shutdown():
         return jsonify({"error": "action must be shutdown or restart"}), 400
     restart = action == "restart"
     log_history("Restart" if restart else "Shutdown", None, "clean %s requested from the app" % action)
+    keep_history_next_boot(restart)       # a restart keeps the history; the next power-on after a shut down starts empty
     subprocess.Popen(["sudo", "shutdown", "-r" if restart else "-h", "now"])
     return jsonify({"ok": True, "action": action, "power_button": has_power_button()})
+
+
+# ---- history reset ---------------------------------------------------------
+# Every power-on starts with an empty history so a site report covers this visit only: jarvis-history-reset.service
+# empties it at boot unless the Pi was only restarted (the marker below), and Settings > Clear History does it by hand.
+HISTORY_MARKER = "/var/lib/jarvis-nettools/keep-history-once"
+HISTORY_SINCE = "/var/lib/jarvis-nettools/history-since.json"
+
+
+def keep_history_next_boot(keep):
+    try:
+        if keep:
+            with open(HISTORY_MARKER, "w") as f:
+                f.write("restart\n")
+        elif os.path.exists(HISTORY_MARKER):
+            os.remove(HISTORY_MARKER)
+    except OSError:
+        pass                              # the boot service decides on its own then (reboot vs power-off)
+
+
+def history_since():
+    try:
+        with open(HISTORY_SINCE) as f:
+            d = json.load(f)
+        return {"ts": int(d["ts"]), "reason": str(d.get("reason", ""))[:20]}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def clear_history(reason):
+    """Same as `jarvis-history-reset --now`: speed tests, monitor samples, outages, the tool log, the last device scan."""
+    global _last_devices
+    with db() as c:
+        for t in ("speed", "samples", "events"):
+            c.execute(f"DELETE FROM {t}")
+    c = sqlite3.connect(DB_PATH, timeout=10)
+    try:
+        c.execute("VACUUM")
+    finally:
+        c.close()
+    with open(HISTORY, "w"):
+        pass
+    _last_devices = []
+    tmp = HISTORY_SINCE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"ts": int(time.time()), "reason": reason}, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, HISTORY_SINCE)
+
+
+@app.post("/api/history/clear")
+@require_login
+def history_clear():
+    try:
+        clear_history("manual")
+    except (OSError, sqlite3.Error) as e:
+        return jsonify({"error": "could not clear the history: %s" % e}), 500
+    return jsonify({"ok": True, "history_since": history_since()})
 
 
 # ---- setup hotspot (built-in radio) ----------------------------------------
@@ -1819,7 +1878,7 @@ def load_cfg():
 def public_settings(c):
     return {"site_name": c.get("site_name", ""), "speed_interval_min": c.get("speed_interval_min", 60),
             "service_checks": c.get("service_checks", []), "saved_devices": c.get("saved_devices", []),
-            "ipinfo_token_set": bool(c.get("ipinfo_token")), "version": APP_VERSION,
+            "ipinfo_token_set": bool(c.get("ipinfo_token")), "version": APP_VERSION, "history_since": history_since(),
             "hostname": run(["hostname"]).strip(), "default_checks": [s["name"] for s in DEFAULT_SERVICES]}
 
 
@@ -2203,10 +2262,25 @@ if __name__ == "__main__":
     from werkzeug.serving import make_server
     threading.Thread(target=agent_pin_resume, daemon=True).start()
     port = int(os.environ.get("NETTOOLS_PORT", "8092"))
-    hosts = {os.environ.get("NETTOOLS_BIND", "127.0.0.1"), "127.0.0.1"}
-    servers = [make_server(h, port, app, threaded=True) for h in hosts]
-    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    bind = os.environ.get("NETTOOLS_BIND", "127.0.0.1")
+
+    def serve_when_ready(host):
+        # The VPN address only exists once Wi-Fi and the VPN are up (a minute or more after boot): the touch screen
+        # uses loopback and must not wait for that, so the VPN listener keeps retrying in the background.
+        logged = False
+        while True:
+            try:
+                srv = make_server(host, port, app, threaded=True)
+                break
+            except OSError as e:
+                if not logged:
+                    print(f"{host}:{port} not available yet ({e.strerror}); retrying every 3 s", flush=True)
+                    logged = True
+                time.sleep(3)
+        if logged:
+            print(f"now also listening on {host}:{port}", flush=True)
+        srv.serve_forever()
+
+    if bind not in ("127.0.0.1", "0.0.0.0"):
+        threading.Thread(target=serve_when_ready, args=(bind,), daemon=True).start()
+    make_server(bind if bind == "0.0.0.0" else "127.0.0.1", port, app, threaded=True).serve_forever()
