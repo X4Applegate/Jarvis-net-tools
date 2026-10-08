@@ -9,6 +9,12 @@ speedometer-style speed test with a bufferbloat grade. Everything is a phone-fir
 > Want to use or collaborate on it? Ask first (GitHub profile **X4Applegate**).
 
 <p align="center">
+  <img src="docs/photos/01-setup.jpg" width="70%" alt="The tester: a Raspberry Pi 5 in a case with a 4.3-inch touch screen, a Wi-Fi 6E adapter on top and a USB-C power bank">
+  <br><sub>The real thing: Raspberry Pi 5, touch-screen case, Wi-Fi 6E adapter, running from a power bank.
+  <a href="#hardware-used">Hardware used</a> · <a href="#the-tester-photos">more photos</a></sub>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/01-info.png" width="23%" alt="Info page with the last speed test mini gauge">
   <img src="docs/screenshots/02-signal.png" width="23%" alt="Wi-Fi channel graph">
   <img src="docs/screenshots/03-route.png" width="23%" alt="Live route hop table">
