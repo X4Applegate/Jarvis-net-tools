@@ -64,6 +64,22 @@ for a setup hotspot. Lessons that cost real time: the adapter must enumerate at 
 (on a 3 A source it throttles under load); turn Wi-Fi power save off; and the Wi-Fi link rate is a raw rate — expect a
 fraction of it in practice.
 
+### Hardware used
+
+| Part | What | Notes |
+|---|---|---|
+| Computer | **Raspberry Pi 5 Model B, 8 GB** (CanaKit Raspberry Pi 5 Starter Kit PRO) | Raspberry Pi OS Lite 64-bit (Debian 13), boots from NVMe; the kit's microSD stays as a fallback |
+| Case | **SunFounder Pironman 5 Pro Max** | 4.3" 800x480 DSI touch screen (runs the app), 0.96" OLED status screen, tower cooler + 2 fans, power button, dual-NVMe board; case software: `extras/pironman5/` |
+| Storage | **Samsung 960 EVO 500 GB** NVMe SSD | boot disk |
+| Wi-Fi (tests) | **ALFA Network AWUS036AXML** - Wi-Fi 6E (802.11axe), AXE3000, 2.4 / 5 / 6 GHz, USB 3.0 | MediaTek MT7921AU (`mt7921u` driver, in the kernel). On Linux it uses up to 80 MHz channels, so the link tops out near 1.2 Gbit/s; must enumerate at USB 3 (5000 M) |
+| Wi-Fi (setup hotspot) | the Pi's built-in radio (Wi-Fi 5) | only on when needed (Settings > Setup Hotspot) |
+| Power at the desk | **5.1 V / 5 A USB-C PD** supply (Pi 5 type) | 27 W+ supplies that offer 5 V / 5 A; a 5 V / 3 A source makes the Pi throttle under load |
+| Power on the go | USB-C power bank (Anker) | works, but offers only 5 V / 3 A to the Pi; a Pi-5 UPS with a 5 V / 5 A output is the better fit |
+| Cables | short **USB-A to USB-C 10 Gbps** cable for the adapter; **5 A (e-marked) USB-C** cable for power | some USB-C cables reach USB 3 in one plug orientation only |
+
+Measured with this setup (business cable line, 5 GHz, Ookla): **775 / 340 Mbps** on the 5 A supply, **734 / 354 Mbps** on
+the power bank; a Wi-Fi 7 laptop on the same access point did 682 / 342.
+
 ### The tester (photos)
 
 A Raspberry Pi 5 in a case with a 4.3" touch screen, the USB Wi-Fi 6E adapter on top, running from a USB-C power bank. The
@@ -94,6 +110,8 @@ scripts/        root helper (jarvis-priv), wifi-clear, token tool, deploy helper
 splash/ systemd/ udev   optional setup hotspot, captive page and service units (placeholders, not for copying as-is)
 cockpit-nettools/       optional Cockpit page
 kiosk/          touch-screen kiosk for the Pi's own display (labwc + Chromium app window + on-screen keyboard)
+extras/pironman5/  Pironman 5 Pro Max case software (SunFounder's installer, patched for the kiosk) + a firewall rule
+                   that keeps the case's login-less dashboard on loopback / the VPN only
 dev/            mock Pi API + Playwright UI suites, backend security tests
 docs/screenshots/ docs/photos/   images used above (photos: metadata stripped, private details blurred)
 ```

@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis: keep the case dashboard + InfluxDB off untrusted networks (VPN and loopback only)
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/jarvis-local-guard.nft
+ExecStop=/usr/sbin/nft delete table inet jarvis_guard
+
+[Install]
+WantedBy=multi-user.target

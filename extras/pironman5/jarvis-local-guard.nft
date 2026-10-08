@@ -1,0 +1,12 @@
+# Jarvis: the case dashboard (34001) and its InfluxDB (8086/8088) have no login. Allow them only from this Pi
+# itself and over the VPN (wg1); drop them on every other network (store Wi-Fi, hotspot, Ethernet).
+table inet jarvis_guard
+delete table inet jarvis_guard
+table inet jarvis_guard {
+  chain input {
+    type filter hook input priority filter - 5; policy accept;
+    iif "lo" accept
+    iifname "wg1" tcp dport { 34001, 8086 } accept
+    tcp dport { 34001, 8086, 8088 } drop
+  }
+}
