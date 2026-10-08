@@ -25,15 +25,16 @@ speedometer-style speed test with a bufferbloat grade. Everything is a phone-fir
 
 | Tab | Highlights |
 |---|---|
-| **Info** | Connection type, SSID, band, signal, link rate, IP and gateway; internet/monitor state; 24 h uptime and outages; a mini gauge with the last speed test. |
+| **Info** | Connection type, SSID, band, signal, link rate, the Wi-Fi adapter's **USB link** (warns when a USB 3 adapter fell back to USB 2), IP and gateway; internet/monitor state; 24 h uptime and outages; a mini gauge with the last speed test; a **power button** (shut down / restart, with a confirm step). |
 | **Signal** | Live Wi-Fi **channel graph** (2.4 / 5 / 6 GHz), join networks, pick a specific access point (BSSID) and band, watch roaming. |
 | **LAN** | Find and identify devices (ARP + port/mDNS/SSDP fingerprints), device watch, saved devices with Wake-on-LAN, rogue-DHCP check, Ethernet jack test (link, DHCP, LLDP/CDP switch and port, VLAN tags). |
 | **Tools** | **Live ping**, continuous ping monitor, **live route** (hop table), **live port scan**, DNS, iperf3 — results appear in a card right under the thing you tapped. |
 | **Speed** | A **speedometer** with an eased needle, ping/jitter/download/upload tiles, a Mbps-over-time trace, a **bufferbloat grade** (latency under load), history charts and an outage timeline. |
-| **Settings** | Site name, scheduled speed tests, custom service checks, saved devices, password, display mode, safe shutdown. |
+| **Settings** | Site name, scheduled speed tests, **setup hotspot Off / Auto / On**, custom service checks, saved devices, password, display mode, safe shutdown. |
 
 Also: a background **network monitor** (internet / gateway / DNS samples, outage log, scheduled speed tests), a printable
-**site report**, an optional **Cockpit** page, an optional **setup hotspot with a captive page** for joining Wi-Fi from a phone,
+**site report**, an optional **Cockpit** page, an optional **setup hotspot with a captive page** for joining Wi-Fi from a phone
+(on **Auto** it stays off while the Pi has a network and turns itself on after 2 minutes without one),
 and a small **agent API** (hashed, scoped bearer tokens) so other automations can read the Pi's state.
 
 ## How it is built (the interesting parts)
@@ -56,9 +57,11 @@ and a small **agent API** (hashed, scoped bearer tokens) so other automations ca
 
 ## Hardware notes
 
-Developed on a Raspberry Pi 4 with a USB 3 Wi-Fi 6E adapter as the primary radio and the built-in radio for a setup hotspot.
-Lessons that cost real time: the adapter must enumerate at USB 3 (5000 M; at USB 2 it caps near 150 Mbit/s), and the Wi-Fi
-link rate is a raw rate — expect a fraction of it in practice.
+Developed on a Raspberry Pi 4, now a Raspberry Pi 5, with a USB 3 Wi-Fi 6E adapter as the primary radio and the built-in radio
+for a setup hotspot. Lessons that cost real time: the adapter must enumerate at USB 3 (5000 M; at USB 2 it caps near
+150 Mbit/s) and some USB-C cables only reach USB 3 in one plug orientation; a Pi 5 needs a supply that offers 5 V / 5 A
+(on a 3 A source it throttles under load); turn Wi-Fi power save off; and the Wi-Fi link rate is a raw rate — expect a
+fraction of it in practice.
 
 ## Security
 

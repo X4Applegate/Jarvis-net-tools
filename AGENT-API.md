@@ -29,7 +29,7 @@ Every call is logged to `/var/lib/jarvis-nettools/agent-access.log`.
 | call | returns |
 |---|---|
 | `GET /api/agent/summary` | **start here**: how the Pi is connected (WiFi/Ethernet), SSID, AP (BSSID + saved name), band, signal, link rate, adapter USB speed (480 = USB 2 problem), last speed test + bufferbloat grade, APs in range, monitor state |
-| `GET /api/status`, `GET /api/signal` | raw `iw link` text |
+| `GET /api/status`, `GET /api/signal` | raw `iw link` text (`/api/status` also has `net` and `usb` = the Wi-Fi adapter's USB link, as `adapter_usb` below) |
 | `GET /api/netmon/status?hours=24`, `/timeline`, `/speed?hours=168` | outage monitor + speed test history |
 | `GET /api/wifi/saved`, `GET /api/apnames` | saved networks, AP names |
 | `GET /api/report?site=<name>[&format=md]` | full site report (HTML or Markdown). Slow (about a minute): it rescans |
@@ -44,6 +44,9 @@ Example: `curl -s -H "Authorization: Bearer $TOKEN" http://<pi-vpn-ip>:8092/api/
 - Bufferbloat grade is the *rise* in latency under load: A+ <5 ms, A <30, B <60, C <200, D <400, F above.
 - A pinned or "stuck" AP shows as a weak `signal_dbm` (-70 or worse) with low `rx_mbps`; compare `aps_in_range`.
 - `adapter_usb_mbps` = 480 means the Alfa fell back to USB 2 (about 150-250 Mbps max); 5000 is correct.
+- `adapter_usb` is the same check as the Info screen's "USB Link" row: `mbps`, `label`, `gen`, `usb3_capable`,
+  `port_usb3`, `status` (`ok` = USB 3, `warn` = a USB 3 adapter running at USB 2 - flip/re-seat its USB-C plug,
+  `info` = a USB 2-only adapter, `unknown`), `hint`, `id` (vendor:product), `product`, `usb_path`. `null` = not a USB radio.
 
 ## Changing the access point (`control` scope)
 `POST /api/agent/ap` with JSON `{"bssid": "02:00:5e:00:00:01", "band": "auto", "hold_minutes": 15}`

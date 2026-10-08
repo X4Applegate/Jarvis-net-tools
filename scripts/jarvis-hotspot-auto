@@ -1,0 +1,249 @@
+#!/usr/bin/python3 -I
+"""jarvis-hotspot-auto - keeps the setup hotspot (JarvisPi-Manage on the built-in radio, wlan0) off unless it is needed.
+
+Install as /usr/local/sbin/jarvis-hotspot-auto (owner root, mode 755); run by jarvis-hotspot-auto.service as root.
+
+The mode comes from the app (Settings > Setup Hotspot), which writes one word to /var/lib/jarvis-nettools/hotspot-mode.
+Anything missing, unreadable or unknown there means "auto".
+  auto  off while the Pi has a network (Wi-Fi on wlan1 or Ethernet). After 2 minutes without one (e.g. a new site) it
+        turns on, so a phone can join it and pick a Wi-Fi on the captive page. Once the Pi has been back online for
+        30 s and no phone is connected it goes off again (a fallback hotspot stays up at least 2 minutes).
+  on    always on.
+  off   always off, not even as a fallback.
+While the hotspot is off the built-in radio is released by NetworkManager and its link is down, so it can't join a
+client network on its own, broadcast anything into the air being tested, or draw power. (Not rfkill: NetworkManager
+treats one soft-blocked Wi-Fi radio as "Wi-Fi off" for every radio, which would also drop wlan1.)
+
+What it is doing, for the app: /run/jarvis-hotspot-auto/state.json (rewritten every few seconds).
+"""
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+
+PROFILE = os.environ.get("HOTSPOT_PROFILE", "JarvisPi-Manage")
+IFACE = os.environ.get("HOTSPOT_IFACE", "wlan0")
+MODE_PATH = "/var/lib/jarvis-nettools/hotspot-mode"
+STATE_DIR = "/run/jarvis-hotspot-auto"
+MODES = ("auto", "on", "off")
+TICK = 5               # seconds between checks
+OFFLINE_AFTER = 120    # seconds without a network before the fallback hotspot comes up
+ONLINE_AFTER = 30      # seconds back online (and no phone connected) before it goes off again
+MIN_UP = 120           # a fallback hotspot stays up at least this long (time to join it; no flapping)
+RETRY_AFTER = 60       # seconds before trying again after a failed nmcli up/down
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def run(argv, timeout=20):
+    """(returncode, stdout). Never raises for a failed or missing command."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, str(e)
+
+
+def terse(line):
+    """Split one `nmcli -t` line on unescaped colons."""
+    return [f.replace("\\:", ":").replace("\\\\", "\\") for f in re.split(r"(?<!\\):", line)]
+
+
+def read_mode(path=MODE_PATH):
+    """The app's choice. The folder belongs to the app user, so: no symlinks, regular files only, a few bytes."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return "auto"
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "auto"
+        word = os.read(fd, 16).decode("ascii", "replace").strip()
+    finally:
+        os.close(fd)
+    return word if word in MODES else "auto"
+
+
+def decide(mode, active, online, held, up_for, clients, raised_by_auto):
+    """'up', 'down' or None.  held = seconds the Pi has been in its current online/offline state."""
+    if mode == "on":
+        return None if active else "up"
+    if mode == "off":
+        return "down" if active else None
+    if not active:
+        return "up" if not online and held >= OFFLINE_AFTER else None
+    if online and held >= ONLINE_AFTER and clients == 0 and (not raised_by_auto or up_for >= MIN_UP):
+        return "down"
+    return None
+
+
+class Hotspot:
+    def __init__(self, cmd=run, clock=time.monotonic, wall=time.time, mode_path=MODE_PATH, state_dir=STATE_DIR):
+        self.cmd, self.clock, self.wall = cmd, clock, wall
+        self.mode_path, self.state_dir = mode_path, state_dir
+        self.online = None
+        self.since = clock()             # when the Pi went online/offline
+        self.up_since = None             # when the hotspot came up (as far as we know)
+        self.raised_by_auto = False
+        self.retry_at = 0
+        self.error = ""
+        self.note = ""
+
+    # ---- what NetworkManager says ----
+    def devices(self):
+        rc, out = self.cmd(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device"])
+        rows = {}
+        for line in out.splitlines() if rc == 0 else []:
+            f = terse(line)
+            if len(f) == 3:
+                rows[f[0]] = (f[1], f[2])
+        return rows
+
+    def active_on_iface(self):
+        """Name of the connection active on IFACE, or ''."""
+        rc, out = self.cmd(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])
+        for line in out.splitlines() if rc == 0 else []:
+            f = terse(line)
+            if len(f) == 2 and f[1] == IFACE:
+                return f[0]
+        return ""
+
+    def profile_exists(self):
+        rc, _ = self.cmd(["nmcli", "-t", "-f", "connection.id", "connection", "show", PROFILE])
+        return rc == 0
+
+    def clients(self):
+        rc, out = self.cmd(["iw", "dev", IFACE, "station", "dump"])
+        return sum(1 for line in out.splitlines() if line.startswith("Station")) if rc == 0 else 0
+
+    def link_up(self):
+        try:
+            with open(f"/sys/class/net/{IFACE}/flags") as f:
+                return int(f.read().strip(), 16) & 1 == 1
+        except (OSError, ValueError):
+            return False
+
+    # ---- actions ----
+    def radio_off(self, devs):
+        """Hand the built-in radio back from NetworkManager and take its link down (idempotent)."""
+        if devs.get(IFACE, ("", ""))[1] != "unmanaged":
+            self.cmd(["nmcli", "device", "set", IFACE, "managed", "no"])
+        if self.link_up():
+            self.cmd(["ip", "link", "set", IFACE, "down"])
+
+    def bring_up(self):
+        self.cmd(["nmcli", "device", "set", IFACE, "managed", "yes"])
+        for _ in range(20):              # NetworkManager needs a moment before the device is usable
+            state = self.devices().get(IFACE, ("", ""))[1]
+            if state and state not in ("unmanaged", "unavailable"):
+                break
+            time.sleep(1)
+        rc, out = self.cmd(["nmcli", "connection", "up", PROFILE, "ifname", IFACE], timeout=60)
+        return rc == 0, out.strip()[-200:]
+
+    def bring_down(self, devs):
+        rc, out = self.cmd(["nmcli", "connection", "down", PROFILE], timeout=30)
+        self.radio_off(devs)
+        return rc == 0 or not self.active_on_iface(), out.strip()[-200:]
+
+    def startup(self):
+        """The hotspot must never start by itself at boot: this service decides."""
+        rc, out = self.cmd(["nmcli", "-t", "-f", "connection.autoconnect", "connection", "show", PROFILE])
+        if rc == 0 and out.strip().endswith(":yes"):
+            self.cmd(["nmcli", "connection", "modify", PROFILE, "connection.autoconnect", "no"])
+            log(f"{PROFILE}: autoconnect turned off (this service starts it when needed)")
+
+    # ---- one check ----
+    def tick(self):
+        now = self.clock()
+        mode = read_mode(self.mode_path)
+        devs = self.devices()
+        st = {"mode": mode, "profile": PROFILE, "iface": IFACE, "ts": int(self.wall()), "active": False, "clients": 0,
+              "online": None, "fallback_in": None, "error": "", "note": ""}
+        if IFACE not in devs:
+            st["note"] = f"no {IFACE} radio"
+            return self.write_state(st)
+        if not self.profile_exists():
+            st["note"] = f"no {PROFILE} profile"
+            return self.write_state(st)
+        current = self.active_on_iface()
+        online = any(t in ("wifi", "ethernet") and s.startswith("connected") for d, (t, s) in devs.items() if d != IFACE)
+        if current and current != PROFILE:
+            if not online:
+                # Safety net (e.g. radios named the wrong way round): never take away the Pi's only network.
+                st["note"] = f"{IFACE} is the Pi's only network ('{current}') - left alone"
+                return self.write_state(st)
+            # A second client connection on the hotspot radio (NetworkManager autoconnected a saved Wi-Fi on it,
+            # e.g. at boot before this service started): released below like any idle hotspot radio.
+            log(f"{IFACE} had joined '{current}' as a second client - releasing it")
+            self.note = f"released '{current}' from {IFACE}"
+        if online != self.online:
+            self.online, self.since = online, now
+        held = now - self.since
+        active = current == PROFILE
+        if active and self.up_since is None:
+            self.up_since = now
+        if not active:
+            self.up_since, self.raised_by_auto = None, False
+        clients = self.clients() if active else 0
+
+        action = decide(mode, active, online, held, now - self.up_since if active else 0, clients, self.raised_by_auto)
+        if action and now >= self.retry_at:
+            if action == "up":
+                why = "no network for %d min" % (OFFLINE_AFTER // 60) if mode == "auto" else "mode on"
+                ok, out = self.bring_up()
+                if ok:
+                    active, self.up_since, self.raised_by_auto = True, self.clock(), mode == "auto"
+            else:
+                why = "back online, no phone connected" if mode == "auto" else "mode off"
+                ok, out = self.bring_down(devs)
+                if ok:
+                    active, self.up_since, self.raised_by_auto = False, None, False
+            if ok:
+                self.error, self.note = "", f"{'on' if action == 'up' else 'off'}: {why}"
+                log(f"hotspot {'on' if action == 'up' else 'off'} ({why})")
+            else:
+                self.error, self.retry_at = f"could not turn the hotspot {'on' if action == 'up' else 'off'}: {out}", now + RETRY_AFTER
+                log(self.error)
+        if not active and action != "down":     # also after a failed start: keep the radio released until the retry
+            self.radio_off(devs)
+
+        st.update(active=active, clients=clients if active else 0, online=online, error=self.error, note=self.note,
+                  fallback_in=max(0, int(OFFLINE_AFTER - held)) if mode == "auto" and not online and not active else None)
+        return self.write_state(st)
+
+    def write_state(self, st):
+        try:
+            os.makedirs(self.state_dir, exist_ok=True)
+            tmp = os.path.join(self.state_dir, ".state.tmp")
+            with open(tmp, "w") as f:
+                json.dump(st, f)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, os.path.join(self.state_dir, "state.json"))
+        except OSError as e:
+            log(f"cannot write state: {e}")
+        return st
+
+
+def main():
+    if not re.match(r"^JarvisPi[A-Za-z0-9._-]{0,24}$", PROFILE) or not re.match(r"^[a-z][a-z0-9_.-]{0,14}$", IFACE):
+        log("refusing: HOTSPOT_PROFILE must start with JarvisPi and HOTSPOT_IFACE must be an interface name")
+        return 64
+    h = Hotspot()
+    h.startup()
+    log(f"watching {PROFILE} on {IFACE} (mode file {MODE_PATH})")
+    while True:
+        try:
+            h.tick()
+        except Exception as e:  # keep running: a bad tick must not leave the hotspot unmanaged for good
+            log(f"tick failed: {e!r}")
+        time.sleep(TICK)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -109,7 +109,8 @@ const PAGES = ["home", "wifi", "network", "tools", "monitor", "settings"];
 const ICON = (id) => '<svg viewBox="0 0 24 24"><use href="#i-' + id + '"/></svg>';
 // per-page app-bar title + actions (icon or text), like the reference app's top bar
 const PAGE_META = {
-  home: { title: "Info", actions: () => [{ icon: "refresh", label: "Refresh", fn: () => refreshHome() }, { icon: "lock", label: "Lock", fn: () => $("logout-btn").click() }] },
+  home: { title: "Info", actions: () => [{ icon: "refresh", label: "Refresh", fn: () => refreshHome() }, { icon: "power", label: "Power", fn: () => openPower() },
+    { icon: "lock", label: "Lock", fn: () => $("logout-btn").click() }] },
   wifi: { title: "Signal", actions: () => [{ text: "Scan", fn: () => $("wifi-scan-btn").click() }] },
   network: { title: "LAN", actions: () => [{ text: "Scan", fn: () => $("btn-devices2").click() }] },
   tools: { title: "Tools", actions: () => [{ text: liveOn ? "Stop" : "Start", fn: () => startTool() }] },
@@ -138,7 +139,7 @@ function goto(page) {
   if (page === "network") renderSavedDevices();
   if (page === "tools") { iperfInfo(); toolHint(); }
   if (page === "monitor") { refreshNetmon(); spKick(); }
-  if (page === "settings") loadSettings();
+  if (page === "settings") { loadSettings(); refreshHotspot(); }
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => goto(b.dataset.page));
 document.addEventListener("click", (e) => {
@@ -176,6 +177,14 @@ function parseLink(link) {
     rate: (link.match(/rx bitrate:\s*([\d.]+ \S+)/) || [])[1] || "?", freq: (link.match(/freq:\s*([\d.]+)/) || [])[1] };
 }
 const bandOf = (f) => !f ? "" : f < 3000 ? "2.4 GHz" : f < 5925 ? "5 GHz" : "6 GHz";
+// USB link of the Wi-Fi adapter: green at USB 3; amber + what to do when a USB 3 adapter fell back to USB 2 (480 Mbps)
+function usbRows(u) {
+  const warn = u.status === "warn", dot = u.status === "ok" ? "ok" : warn ? "warn" : "";
+  let r = "<div class='row' id='home-usb'><span class='lbl'>USB Link</span><span class='val'>" + esc(u.label) +
+    " <span class='muted'>· " + esc(u.gen) + "</span><i class='dot " + dot + "'></i></span></div>";
+  if (u.hint && u.status !== "ok") r += "<div class='row note' id='home-usb-hint'><span class='small " + (warn ? "nm-warn" : "muted") + "'>" + (warn ? "⚠ " : "") + esc(u.hint) + "</span></div>";
+  return r;
+}
 async function refreshStatus() {
   try {
     const d = await api("/api/status"); const p = parseLink(d.link);
@@ -197,6 +206,7 @@ async function refreshHome() {
     if (net.type !== "ethernet" && p.ssid) {
       r += kv("Network", esc(p.ssid)) + kv("Band", bandOf(+p.freq) || "—") + kv("Signal", esc(p.sig) + " dBm") + kv("Link Rate", esc(p.rate));
     } else if (p.ssid) r += kv("WiFi radio", "on " + esc(p.ssid));
+    if (st.usb) r += usbRows(st.usb);
     r += kv("IP Address", esc(net.ip || "N/A")) + kv("Default Gateway", esc(net.gw || "N/A"));
     r += kv("Internet", nm.last ? (inetOn ? "<span class='nm-ok'>online</span>" : "<span class='nm-bad'>OFFLINE</span>") + (nm.last.inet_ms ? " <span class='muted'>" + nm.last.inet_ms + " ms</span>" : "") : "<span class='muted'>unknown</span>");
     r += kv("Monitor", nm.running ? "<span class='nm-ok'>running</span>" : "<span class='nm-bad'>stopped</span>");
@@ -1017,18 +1027,114 @@ const report = () => { const site = settings.site_name || ""; liveStatus("📄 B
   const w = window.open("/api/report?site=" + encodeURIComponent(site), "_blank"); if (!w) show("Pop-up blocked — allow pop-ups for this app."); setTimeout(() => liveStatus(""), 25000); };
 $("btn-report").onclick = report; $("btn-report2").onclick = report;
 
+// ---------- setup hotspot (Settings) ----------
+// The root service jarvis-hotspot-auto does the switching: we save the mode and show what it reports (every 3 s
+// while Settings is open).
+const HS_HINT = {
+  auto: "Off while the Pi has a network. If it has none for 2 minutes (e.g. at a new site) the hotspot turns on by itself so you can set up Wi-Fi from your phone, and turns off again once the Pi is back online.",
+  on: "Always on: phones can join {ssid} any time. It adds a network to the air you are testing and uses a little power.",
+  off: "Never on, not even when the Pi has no network. Join Wi-Fi from this touch screen instead.",
+};
+let hsTimer = null, hsWant = null, hsUntil = 0;
+const mmss = (s) => s == null ? "a moment" : Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+function renderHotspot(d) {
+  document.querySelectorAll("#hs-seg button").forEach(b => { const on = b.dataset.m === d.mode; b.classList.toggle("on", on); b.setAttribute("aria-checked", String(on)); });
+  $("hs-ssid").textContent = d.ssid || "";
+  $("hs-hint").textContent = HS_HINT[d.mode].replace("{ssid}", d.ssid || "the hotspot");
+  const pending = hsWant === d.mode && Date.now() < hsUntil && ((d.mode === "on" && !d.active) || (d.mode === "off" && d.active));
+  let txt, dot = "";
+  if (!d.service) { txt = "Hotspot service not running"; dot = "warn"; }
+  else if (d.error) { txt = d.error; dot = "bad"; }
+  else if (pending) { txt = d.mode === "on" ? "Turning on…" : "Turning off…"; dot = "warn"; }
+  else if (d.active) { txt = "On · " + d.clients + (d.clients === 1 ? " phone" : " phones") + " connected"; dot = "ok"; }
+  else if (d.mode === "auto" && d.online === false) { txt = "Off · no network: turns on in " + mmss(d.fallback_in); dot = "warn"; }
+  else if (d.mode === "auto") txt = "Off · the Pi has a network";
+  else txt = "Off";
+  $("hs-now").innerHTML = esc(txt) + "<i class='dot " + dot + "'></i>";
+}
+async function refreshHotspot() {
+  clearTimeout(hsTimer);
+  if (curPage !== "settings") return;
+  try { renderHotspot(await api("/api/hotspot")); } catch (e) { $("hs-now").textContent = e.message; }
+  if (curPage === "settings") hsTimer = setTimeout(refreshHotspot, 3000);
+}
+document.querySelectorAll("#hs-seg button").forEach(b => b.onclick = async () => {
+  hsWant = b.dataset.m; hsUntil = Date.now() + 60000;
+  try {
+    const d = await api("/api/hotspot", { mode: hsWant });
+    if (!d.ok) { show("❌ " + (d.error || "Could not change the hotspot.")); return; }
+    renderHotspot(d);
+  } catch (e) { show(e.message); return; }
+  refreshHotspot();
+});
+
 // ---------- power ----------
-$("btn-shutdown").onclick = async () => {
-  if (!window.confirm("Shut down the Pi now?\n\nAll access stops. To turn it back on you'll unplug and re-plug the power.")) return;
-  try { await api("/api/shutdown", {}); } catch (e) {}
-  document.querySelectorAll("button").forEach(b => { if (b.id !== "dock-toggle") b.disabled = true; });
-  let n = 30; expandDock();
+// One dialog for the Info header ⏻ and Settings > Power. Nothing happens until a second tap on Shut Down / Restart;
+// once a command is sent the dialog stays up (Esc / tapping outside can't close it) and shows what to do next.
+const powerDlg = $("power-dlg");
+let powerBusy = false;
+function powerText(title, msg) { $("power-title").textContent = title; $("power-msg").textContent = msg; }
+function openPower() {
+  if (powerBusy) { if (!powerDlg.open) powerDlg.showModal(); return; }
+  powerText("Turn off the Pi?", "Shuts down cleanly so the disk is safe. Restart brings it back by itself in about a minute.");
+  $("power-btns").classList.remove("hidden");
+  powerDlg.showModal(); $("power-cancel").focus();
+}
+$("btn-shutdown").onclick = openPower;
+$("power-cancel").onclick = () => powerDlg.close();
+powerDlg.addEventListener("click", (e) => { if (e.target === powerDlg && !powerBusy) powerDlg.close(); });   // tap on the dimmed backdrop = Cancel
+powerDlg.addEventListener("cancel", (e) => { if (powerBusy) e.preventDefault(); });
+powerDlg.addEventListener("close", () => { if (powerBusy) powerDlg.showModal(); });
+$("power-off").onclick = () => powerDo("shutdown");
+$("power-restart").onclick = () => powerDo("restart");
+
+async function powerDo(action) {
+  const restart = action === "restart";
+  powerBusy = true; $("power-btns").classList.add("hidden");
+  powerText(restart ? "Restarting…" : "Shutting down…", "Sending the command…");
+  let d = {};
+  try { d = await api("/api/shutdown", { action }); }
+  catch (e) {
+    if ($("app").classList.contains("hidden")) { powerBusy = false; powerDlg.close(); return; }   // 401: the login screen took over
+    // otherwise the Pi may already be dropping the connection on its way down
+  }
+  if (d.error) {
+    powerBusy = false; $("power-btns").classList.remove("hidden");
+    powerText("Couldn't " + (restart ? "restart" : "shut down"), d.error); return;
+  }
+  if (restart) return powerWaitBack();
+  const back = d.power_button ? "To turn it back on: press the power button on the case."
+                              : "To turn it back on: unplug the power, wait a few seconds, plug it back in.";
+  let n = 30;
   const tick = () => {
-    if (n <= 0) { clearInterval(t); show("✅ SAFE TO UNPLUG NOW.\n\nThe Pi should be fully off (green LED dark).\nTo restart: unplug the power, wait a few seconds, plug back in."); liveStatus(""); return; }
-    liveStatus("Shutting down…"); show("⏻ Pi is shutting down — do NOT unplug yet.\n\nSAFE TO UNPLUG IN:  " + n + "s\n\n(or the instant the Pi's green ACT LED stops flashing and goes dark — that's the true signal)\n\nTo turn it back on later: unplug, wait a few seconds, plug the power back in."); n--;
+    if (n <= 0) { clearInterval(t); powerText("✅ Safe to unplug", "The Pi is off (green LED dark).\n" + back); return; }
+    powerText("Shutting down…", "Do NOT unplug yet: safe in " + n + " s (or as soon as the green LED goes dark).\n" + back); n--;
   };
   tick(); const t = setInterval(tick, 1000);
-};
+}
+
+// Restart: wait until the Pi has gone away and answers again, then reload (the touch screen's kiosk restarts with the Pi).
+function powerWaitBack() {
+  const t0 = Date.now(); let seenDown = false;
+  const poll = async () => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    let up = false;
+    try {
+      const ac = new AbortController(), to = setTimeout(() => ac.abort(), 2500);
+      up = (await fetch("/api/me", { cache: "no-store", signal: ac.signal })).ok; clearTimeout(to);
+    } catch (e) { up = false; }
+    if (!up) seenDown = true;
+    if (up && seenDown) { location.reload(); return; }
+    if (up && s > 60) {
+      powerBusy = false; $("power-btns").classList.remove("hidden");
+      powerText("Still running", "The Pi didn't restart. Try again, or use the power button on the case."); return;
+    }
+    if (s > 300) { powerText("Not back yet", "The Pi hasn't come back after 5 minutes. Check its power and network, then reload this page."); return; }
+    powerText("Restarting…", (seenDown ? "The Pi is restarting. This page reconnects by itself" : "Waiting for the Pi to go down") + " (" + s + " s)");
+    setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 2000);
+}
 
 // ---------- boot ----------
 $("dock-toggle").onclick = () => toggleDock();

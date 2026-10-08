@@ -72,6 +72,16 @@ class Auth(unittest.TestCase):
         self.assertIn("SameSite=Lax", cookie)
         self.assertTrue(c.get("/api/me", environ_base=remote("198.51.100.9")).get_json()["auth"])
 
+    def test_me_trusts_loopback_only(self):
+        # the Pi's own touch-screen kiosk talks to 127.0.0.1 and needs no login; nobody else gets that
+        mod, _ = load_app({"trusted_proxies": ["203.0.113.1"]})
+        c = mod.app.test_client()
+        self.assertTrue(c.get("/api/me", environ_base=remote("127.0.0.1")).get_json()["auth"])
+        self.assertFalse(c.get("/api/me", environ_base=remote("198.51.100.9")).get_json()["auth"])
+        # a request through the reverse proxy can't claim to be loopback via X-Forwarded-For
+        r = c.get("/api/me", environ_base=remote("203.0.113.1"), headers={"X-Forwarded-For": "127.0.0.1"})
+        self.assertFalse(r.get_json()["auth"])
+
     def test_wrong_password_is_refused_then_throttled(self):
         mod, _ = load_app()
         clock = Fake()
@@ -140,7 +150,8 @@ class Auth(unittest.TestCase):
         mod, _ = load_app()
         c = mod.app.test_client()
         for method, path in [("get", "/api/status"), ("post", "/api/ping/stream"), ("post", "/api/trace/stream"), ("post", "/api/portscan/stream"),
-                             ("post", "/api/speedtest/stream"), ("post", "/api/wifi/join"), ("post", "/api/shutdown"), ("get", "/api/devices.csv")]:
+                             ("post", "/api/speedtest/stream"), ("post", "/api/wifi/join"), ("post", "/api/shutdown"), ("get", "/api/devices.csv"),
+                             ("get", "/api/hotspot"), ("post", "/api/hotspot")]:
             r = getattr(c, method)(path, json={}, environ_base=remote("198.51.100.9")) if method == "post" else c.get(path, environ_base=remote("198.51.100.9"))
             self.assertEqual(r.status_code, 401, path)
 

@@ -72,9 +72,9 @@ a { color: inherit; }
 .pad.tight { padding-bottom: 10px; }
 .pad p { margin: 4px 0 8px; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); margin-left: 8px; vertical-align: middle; }
-.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: #fbbf24; }
 .live { color: var(--ok); font-weight: 600; }
-.nm-ok { color: var(--ok); font-weight: 700; } .nm-bad { color: var(--bad); font-weight: 700; }
+.nm-ok { color: var(--ok); font-weight: 700; } .nm-bad { color: var(--bad); font-weight: 700; } .nm-warn { color: #fbbf24; font-weight: 600; }
 
 /* ---- list-style action rows ---- */
 .rowbtn { display: flex; width: 100%; align-items: center; justify-content: space-between; text-align: left; margin: 0;
@@ -260,3 +260,12 @@ canvas#home-gauge { flex: 0 0 auto; width: 138px; height: 112px; display: block;
 .hs-row small { color: var(--muted); font-size: 11px; min-width: 26px; }
 .gradechip.sm { min-width: 28px; height: 24px; font-size: 14px; border-radius: 7px; margin-left: 4px; font-style: normal; }
 .hs-vals.empty b { color: #475569; }
+
+/* ---- power dialog (Info header ⏻, Settings > Power) ---- */
+#power-dlg { width: min(92vw, 440px); padding: 0; border: 1px solid var(--border); border-radius: 16px; background: var(--head); color: var(--text); }
+#power-dlg::backdrop { background: rgba(3, 8, 18, .72); }
+#power-dlg .dlg-body { padding: 20px 20px 18px; }
+#power-title { font-size: 21px; font-weight: 500; margin-bottom: 8px; }
+#power-msg { margin: 0; font-size: 15px; line-height: 1.4; white-space: pre-line; }
+#power-btns { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }   /* one row on the touch screen; Cancel wraps to its own row on a phone */
+#power-btns button { flex: 1 1 116px; height: 52px; margin: 0; padding: 0 6px; font-size: 16px; }

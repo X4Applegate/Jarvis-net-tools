@@ -272,7 +272,9 @@ def logout():
 
 @app.get("/api/me")
 def me():
-    return jsonify({"auth": bool(session.get("auth"))})
+    # Loopback is already trusted by require_login (Cockpit page, the Pi's own touch-screen kiosk),
+    # so tell the UI the same instead of showing it a login screen it doesn't need.
+    return jsonify({"auth": bool(session.get("auth")) or request.remote_addr == "127.0.0.1"})
 
 
 # ---- connection / status -------------------------------------------------
@@ -292,10 +294,76 @@ def net_info():
             "speed": speed if speed and speed != "-1" else "", "duplex": sysfs("duplex")}
 
 
+USB_GENS = {1.5: "USB 1.0", 12: "USB 1.1", 480: "USB 2.0", 5000: "USB 3", 10000: "USB 3.2 Gen 2", 20000: "USB 3.2 Gen 2x2"}
+
+
+def usb_superspeed_capable(bos):
+    """From a device's raw BOS descriptor: True if it lists a SuperSpeed or SuperSpeedPlus capability (a USB 3 device,
+    even while it runs at USB 2 speed), False if it lists neither, None if there is no usable BOS."""
+    if len(bos) < 5 or bos[0] < 5 or bos[1] != 0x0F:
+        return None
+    i, end = bos[0], min(len(bos), bos[2] | bos[3] << 8)
+    while i + 3 <= end and bos[i] >= 3:
+        if bos[i + 1] == 0x10 and bos[i + 2] in (0x03, 0x0A):
+            return True
+        i += bos[i]
+    return False
+
+
+def usb_link(iface=WLAN, sys_root="/sys"):
+    """USB link of the Wi-Fi adapter for the Info screen: negotiated speed, whether the adapter and its port can do
+    USB 3, and a status + hint. A USB 3 adapter that only gets its USB 2 contacts (USB-C plug the wrong way round, plug
+    not fully in, USB 2 port/cable/hub) runs at 480 Mbps, which caps Wi-Fi at roughly 150-250 Mbps. None if not USB."""
+    try:
+        return _usb_link(iface, sys_root)
+    except Exception:
+        return None
+
+
+def _usb_link(iface, sys_root):
+    def rd(name):
+        try:
+            return open(os.path.join(dev, name)).read().strip()
+        except Exception:
+            return ""
+    dev = os.path.realpath(f"{sys_root}/class/net/{iface}/device")
+    for _ in range(4):                       # interface dir (2-1:1.3) -> USB device dir (2-1), which has speed + idVendor
+        dev = os.path.dirname(dev)
+        if rd("speed") and rd("idVendor"):
+            break
+    else:
+        return None
+    mbps = float(rd("speed"))
+    try:
+        bos = open(os.path.join(dev, "bos_descriptors"), "rb").read()
+    except Exception:
+        bos = b""
+    capable = usb_superspeed_capable(bos)
+    if capable is None and re.match(r"^[3-9]\.", rd("version")):
+        capable = True                       # running at USB 3 right now
+    port = os.path.join(dev, "port")         # a port with a "peer" is one half of a USB 3 port (blue)
+    port_usb3 = True if mbps >= 5000 else os.path.exists(os.path.join(port, "peer")) if os.path.isdir(port) else None
+    if mbps >= 5000:
+        state, hint = "ok", ""
+    elif capable and port_usb3 is False:     # hints stay one line on the 800 px touch screen
+        state, hint = "warn", "USB 3 adapter on a USB 2 port or hub (Wi-Fi max ~200 Mbps): move it to a blue USB 3 port."
+    elif capable:
+        state, hint = "warn", "USB 3 adapter on USB 2 (Wi-Fi max ~200 Mbps): flip the USB-C plug 180°, push both ends fully in."
+    elif capable is False:
+        state, hint = "info", "USB 2 adapter: 480 Mbps is its maximum."
+    else:
+        state, hint = "unknown", "If this adapter is USB 3, re-plug it firmly into a blue USB 3 port."
+    n = int(mbps) if mbps == int(mbps) else mbps
+    return {"iface": iface, "mbps": n, "label": f"{n / 1000:g} Gbps" if n >= 1000 else f"{n:g} Mbps",
+            "gen": USB_GENS.get(n, "USB"), "usb3_capable": capable, "port_usb3": port_usb3, "status": state,
+            "hint": hint, "id": rd("idVendor") + ":" + rd("idProduct"), "product": rd("product"),
+            "usb_path": os.path.basename(dev)}
+
+
 @app.get("/api/status")
 @require_login
 def status():
-    return jsonify({"link": run(["/usr/sbin/iw", "dev", WLAN, "link"]), "net": net_info(),
+    return jsonify({"link": run(["/usr/sbin/iw", "dev", WLAN, "link"]), "net": net_info(), "usb": usb_link(),
                     "active": run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])})
 
 
@@ -330,13 +398,19 @@ def wifi_scan():
 
 
 def wifi_profiles():
-    """name -> ssid for every saved WiFi profile."""
+    """name -> ssid for every saved WiFi client profile usable on the client radio. Profiles pinned to
+    another interface (e.g. the one Raspberry Pi Imager creates for the built-in wlan0) and hotspot
+    (AP-mode) profiles are skipped: `nmcli connection up <them> ifname wlan1` can only fail."""
     prof = {}
     for line in run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"]).splitlines():
         if line.endswith(":802-11-wireless"):
             name = line[: -len(":802-11-wireless")]
-            s = run(["nmcli", "-t", "-f", "802-11-wireless.ssid", "connection", "show", name]).strip()
-            prof[name] = s.split(":", 1)[1] if ":" in s else s
+            out = run(["nmcli", "-t", "-f", "802-11-wireless.ssid,802-11-wireless.mode,connection.interface-name",
+                       "connection", "show", name])
+            f = dict(l.split(":", 1) for l in out.splitlines() if ":" in l)
+            if f.get("connection.interface-name", "") not in ("", WLAN) or f.get("802-11-wireless.mode") == "ap":
+                continue
+            prof[name] = f.get("802-11-wireless.ssid", "")
     return prof
 
 
@@ -1053,19 +1127,10 @@ def wifi_link_note():
         rx, tx, sig = g(r"rx bitrate:\s*([\d.]+)"), g(r"tx bitrate:\s*([\d.]+)"), g(r"signal:\s*(-?\d+)")
         if not (rx or tx):
             return ""
-        usb = ""
-        try:
-            dev = os.path.realpath(f"/sys/class/net/{WLAN}/device")
-            for _ in range(4):
-                dev = os.path.dirname(dev)
-                if os.path.exists(os.path.join(dev, "speed")):
-                    usb = open(os.path.join(dev, "speed")).read().strip()
-                    break
-        except Exception:
-            pass
+        usb = usb_link()
         note = f"\nWi-Fi link ({WLAN}): rx {rx or '?'} / tx {tx or '?'} Mbps, signal {sig or '?'} dBm"
         if usb:
-            note += f"\nUSB bus speed: {usb} Mbps" + ("  ⚠ USB 2.0 — adapter limited to roughly 150-250 Mbps" if usb == "480" else "")
+            note += f"\nUSB bus speed: {usb['mbps']} Mbps ({usb['gen']})" + (f"  ⚠ {usb['hint']}" if usb["status"] == "warn" else "")
         return note + "\n"
     except Exception:
         return ""
@@ -1555,13 +1620,92 @@ def history():
         return jsonify({"output": "No history yet — run a tool first."})
 
 
+MODEL_PATH = "/proc/device-tree/model"
+
+
+def has_power_button():
+    """Pi 5 / Pi 500 (and cases wired to their button, e.g. the Pironman 5) turn back on with a button press;
+    older Pis need the power unplugged and plugged back in."""
+    try:
+        with open(MODEL_PATH) as f:
+            model = f.read()
+    except OSError:
+        return False
+    return bool(re.search(r"Raspberry Pi (5|500)\b", model))
+
+
 @app.post("/api/shutdown")
 @require_login
 def shutdown():
-    # Fire-and-forget clean poweroff; response returns before the Pi halts.
-    log_history("Shutdown", None, "clean shutdown requested from the app")
-    subprocess.Popen(["sudo", "shutdown", "-h", "now"])
-    return jsonify({"ok": True})
+    # Fire-and-forget clean poweroff (or restart); response returns before the Pi halts.
+    # An empty body still means "shut down" (older cached app versions send {}).
+    action = (request.get_json(silent=True) or {}).get("action", "shutdown")
+    if action not in ("shutdown", "restart"):
+        return jsonify({"error": "action must be shutdown or restart"}), 400
+    restart = action == "restart"
+    log_history("Restart" if restart else "Shutdown", None, "clean %s requested from the app" % action)
+    subprocess.Popen(["sudo", "shutdown", "-r" if restart else "-h", "now"])
+    return jsonify({"ok": True, "action": action, "power_button": has_power_button()})
+
+
+# ---- setup hotspot (built-in radio) ----------------------------------------
+# The root service jarvis-hotspot-auto does the switching (no sudo needed here): the app only writes the chosen mode
+# to a file the service reads, and shows the state the service reports.
+HOTSPOT_MODE_PATH = "/var/lib/jarvis-nettools/hotspot-mode"
+HOTSPOT_STATE_PATH = "/run/jarvis-hotspot-auto/state.json"
+HOTSPOT_MODES = ("auto", "on", "off")
+
+
+def hotspot_status():
+    try:
+        with open(HOTSPOT_MODE_PATH) as f:
+            mode = f.read(16).strip()
+    except OSError:
+        mode = ""
+    try:
+        with open(HOTSPOT_STATE_PATH) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        st = {}
+    if not isinstance(st, dict):
+        st = {}
+    try:
+        fresh = time.time() - float(st.get("ts", 0)) < 30       # the service rewrites it every 5 s
+    except (TypeError, ValueError):
+        fresh = False
+    fb = st.get("fallback_in")
+    return {"mode": mode if mode in HOTSPOT_MODES else "auto", "service": fresh,
+            "ssid": str(st.get("profile") or "JarvisPi-Manage")[:40],
+            "active": bool(st.get("active")) if fresh else None,
+            "clients": int(st.get("clients") or 0) if fresh and str(st.get("clients", "0")).isdigit() else 0,
+            "online": bool(st.get("online")) if fresh and st.get("online") is not None else None,
+            "fallback_in": int(fb) if fresh and isinstance(fb, (int, float)) else None,
+            "error": str(st.get("error") or "")[:300] if fresh else "", "note": str(st.get("note") or "")[:200] if fresh else ""}
+
+
+@app.get("/api/hotspot")
+@require_login
+def hotspot_get():
+    return jsonify(hotspot_status())
+
+
+@app.post("/api/hotspot")
+@require_login
+def hotspot_set():
+    data = request.get_json(silent=True)
+    mode = data.get("mode") if isinstance(data, dict) else None
+    if mode not in HOTSPOT_MODES:
+        return jsonify({"error": "mode must be auto, on or off"}), 400
+    try:
+        tmp = HOTSPOT_MODE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(mode + "\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, HOTSPOT_MODE_PATH)
+    except OSError as e:
+        return jsonify({"error": "could not save the setting: %s" % e.strerror}), 500
+    log_history("Setup hotspot", None, "mode set to " + mode)
+    return jsonify({"ok": True, **hotspot_status()})
 
 
 # ---- monitoring DB (shared with the jarvis-netmon daemon) ----------------
@@ -1868,18 +2012,6 @@ def report_md(d):
     return "\n".join(L) + "\n"
 
 
-def wifi_usb_speed():
-    try:
-        dev = os.path.realpath(f"/sys/class/net/{WLAN}/device")
-        for _ in range(4):
-            dev = os.path.dirname(dev)
-            if os.path.exists(os.path.join(dev, "speed")):
-                return int(open(os.path.join(dev, "speed")).read().strip())
-    except Exception:
-        pass
-    return None
-
-
 @app.get("/api/agent/summary")
 @require_login
 def agent_summary():
@@ -1895,6 +2027,7 @@ def agent_summary():
     freq = gl(r"freq:\s*(\d+)", int)
     ssid = gl(r"SSID:\s*(.+)")
     names = load_ap_names()
+    usb = usb_link()
     try:
         with db() as c:
             row = c.execute("SELECT * FROM speed ORDER BY ts DESC LIMIT 1").fetchone()
@@ -1907,7 +2040,7 @@ def agent_summary():
         "wifi": {"connected": bool(ssid), "ssid": ssid, "bssid": bssid or None, "ap_name": names.get(bssid, "") if bssid else "",
                  "band_ghz": band_of(freq) if freq else None, "freq_mhz": freq, "signal_dbm": gl(r"signal:\s*(-?\d+)", int),
                  "rx_mbps": gl(r"rx bitrate:\s*([\d.]+)", float), "tx_mbps": gl(r"tx bitrate:\s*([\d.]+)", float),
-                 "adapter_usb_mbps": wifi_usb_speed()},
+                 "adapter_usb_mbps": usb["mbps"] if usb else None, "adapter_usb": usb},
         "last_speedtest": ({k: last[k] for k in ("ts", "source", "server", "ping", "jitter", "down", "up", "down_lat", "up_lat", "grade")} if last else None),
         "aps_in_range": ap_rows_api(ssid) if ssid else [],
         "monitor_running": run(["systemctl", "is-active", "jarvis-netmon"]).strip() == "active"})

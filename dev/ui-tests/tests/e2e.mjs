@@ -11,7 +11,7 @@ let pass = 0, fail = 0; const ok = (c, m) => { if (c) pass++; else { fail++; con
 await page.goto("http://127.0.0.1:8099/index.html"); await page.waitForTimeout(800);
 ok(await page.locator("#page-home").isVisible(), "home visible on boot");
 ok((await page.locator("#hdr-title").textContent()) === "Info", "title Info");
-ok((await page.locator("#hdr-actions button").count()) === 2, "info has 2 header actions");
+ok((await page.locator("#hdr-actions button").count()) === 3, "info has 3 header actions (refresh, power, lock)");
 
 // nav through all 6 tabs, check title + page visibility + active pill
 for (const [pg, title] of [["wifi","Signal"],["network","LAN"],["tools","Tools"],["monitor","Speed"],["settings","Settings"],["home","Info"]]) {
