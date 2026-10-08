@@ -23,7 +23,6 @@ class HistoryApi(unittest.TestCase):
         self.mod.DB_PATH = os.path.join(d, "netmon.db")
         self.mod.HISTORY = os.path.join(d, "history.log")
         self.mod.HISTORY_SINCE = os.path.join(d, "history-since.json")
-        self.mod.HISTORY_MARKER = os.path.join(d, "keep-history-once")
         self.c = self.mod.app.test_client()
         r = {"ts": 100, "server": "s", "isp": "i", "ping": 1.0, "jitter": 1.0, "down": 734.0, "up": 354.0,
              "down_lat": 1.0, "up_lat": 1.0, "loss": 0.0, "grade": "A", "url": ""}
@@ -61,6 +60,15 @@ class HistoryApi(unittest.TestCase):
             with open(self.mod.HISTORY_SINCE, "w") as f:
                 f.write(junk)
             self.assertIsNone(self.c.get("/api/settings", environ_base=KIOSK).get_json()["history_since"], junk)
+
+    def test_device_scan_from_before_the_last_reset_is_not_reused(self):
+        self.mod._last_devices, self.mod._last_devices_ts = [{"ip": "192.0.2.10"}], 1000
+        self.assertEqual(self.mod.cached_devices(), [{"ip": "192.0.2.10"}])     # no reset recorded yet
+        with open(self.mod.HISTORY_SINCE, "w") as f:
+            json.dump({"ts": 2000, "reason": "new-day"}, f)                        # the service emptied it later
+        self.assertEqual(self.mod.cached_devices(), [])
+        self.mod._last_devices_ts = 3000                                          # scanned after the reset
+        self.assertEqual(self.mod.cached_devices(), [{"ip": "192.0.2.10"}])
 
     def test_remote_callers_need_a_login(self):
         r = self.c.post("/api/history/clear", json={}, environ_base=remote("198.51.100.9"))

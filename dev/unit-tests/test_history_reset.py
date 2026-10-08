@@ -1,4 +1,4 @@
-"""Unit tests for scripts/jarvis-history-reset (empty history at every power-on, kept across a restart).
+"""Unit tests for scripts/jarvis-history-reset (the history lasts one day: kept all day, emptied on a new day).
 
 Plain Python, no Flask, works on temp files only:
     python3 -m unittest -v dev/unit-tests/test_history_reset.py        (from the repo root)
@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -19,10 +20,6 @@ spec = importlib.util.spec_from_loader("jarvis_history_reset", loader)
 hr = importlib.util.module_from_spec(spec)
 loader.exec_module(hr)
 
-# `systemctl list-jobs --no-legend` while shutting down
-JOBS_REBOOT = "1123 reboot.target start waiting\n1180 systemd-reboot.service start waiting\n1099 jarvis-netmon.service stop running\n"
-JOBS_POWEROFF = "1123 poweroff.target start waiting\n1180 systemd-poweroff.service start waiting\n"
-JOBS_HALT = "77 halt.target start waiting\n"
 
 
 class Files(unittest.TestCase):
@@ -45,6 +42,18 @@ class Files(unittest.TestCase):
             f.write("===== [2026-10-08 10:11:31] Speed Test =====\n733.9 / 354.3\n")
         os.chmod(self.log, 0o640)
         self.kw = dict(db_path=self.db, history=self.log, since=self.since, now=lambda: 1791480000)
+        self.forgot = 0
+
+    def forget(self):
+        self.forgot += 1
+
+    def fill(self):
+        c = sqlite3.connect(self.db)
+        with c:
+            c.executemany("INSERT INTO speed(ts, down, up) VALUES(?,?,?)", [(1, 500.0, 300.0), (2, 734.0, 354.0)])
+        c.close()
+        with open(self.log, "a") as f:
+            f.write("tool output\n")
 
     def counts(self):
         c = sqlite3.connect(self.db)
@@ -71,44 +80,70 @@ class Files(unittest.TestCase):
         self.assertFalse(os.path.exists(self.db))       # nothing created; the app makes its own DB
         self.assertTrue(os.path.exists(self.since))
 
-    def test_boot_after_power_off_clears(self):
-        self.assertIsNotNone(hr.boot(marker=self.marker, **self.kw))
-        self.assertEqual(self.counts()["speed"], 0)
+    def day(self, y, m, d, hh=12):
+        return time.mktime((y, m, d, hh, 0, 0, 0, 0, -1))      # local time, like the Pi
 
-    def test_boot_after_restart_keeps_once(self):
-        hr.keep_next_boot(True, self.marker)
-        self.assertIsNone(hr.boot(marker=self.marker, **self.kw))
+    def test_same_day_keeps_everything(self):
+        hr.wipe("new-day", **dict(self.kw, now=lambda: self.day(2026, 10, 8, 7)))
+        self.fill()
+        for hh in (8, 12, 18, 23):                                 # power-offs, restarts, timer runs all day long
+            self.assertIsNone(hr.check(forget=self.forget, since=self.since, now=lambda: self.day(2026, 10, 8, hh), db_path=self.db, history=self.log))
         self.assertEqual(self.counts()["speed"], 2)
-        self.assertFalse(os.path.exists(self.marker))    # used up: the boot after that clears again
-        hr.boot(marker=self.marker, **self.kw)
+        self.assertGreater(os.path.getsize(self.log), 0)
+
+    def test_new_day_clears(self):
+        hr.wipe("new-day", **dict(self.kw, now=lambda: self.day(2026, 10, 8, 23)))
+        self.fill()
+        removed = hr.check(forget=self.forget, since=self.since, now=lambda: self.day(2026, 10, 9, 0), db_path=self.db, history=self.log)
+        self.assertEqual(removed["speed"], 2)
+        self.assertEqual(self.counts(), {"speed": 0, "samples": 0, "events": 0})
+        with open(self.since) as f:
+            self.assertEqual(json.load(f)["reason"], "new-day")
+        self.assertIsNone(hr.check(forget=self.forget, since=self.since, now=lambda: self.day(2026, 10, 9, 9), db_path=self.db, history=self.log))
+        self.assertEqual(self.forgot, 1)                           # visited Wi-Fi forgotten once, on the new day only
+
+    def test_off_for_days_or_never_reset_clears(self):
+        self.assertIsNotNone(hr.check(forget=self.forget, since=self.since, now=lambda: self.day(2026, 10, 8), db_path=self.db, history=self.log))
+        self.fill()
+        self.assertIsNotNone(hr.check(forget=self.forget, since=self.since, now=lambda: self.day(2026, 10, 12), db_path=self.db, history=self.log))
         self.assertEqual(self.counts()["speed"], 0)
 
-    def test_shutdown_kind(self):
-        self.assertEqual(hr.shutdown_kind(JOBS_REBOOT), "restart")
-        self.assertEqual(hr.shutdown_kind(JOBS_POWEROFF), "poweroff")
-        self.assertEqual(hr.shutdown_kind(JOBS_HALT), "poweroff")
-        self.assertEqual(hr.shutdown_kind(""), "")
-        self.assertEqual(hr.shutdown_kind("No jobs running.\n"), "")
-        self.assertEqual(hr.shutdown_kind("12 reboot.target.wants-not start\n"), "")    # exact unit names only
+    def test_clock_behind_at_boot_keeps(self):
+        hr.wipe("new-day", **dict(self.kw, now=lambda: self.day(2026, 10, 9, 8)))
+        self.fill()
+        # no RTC battery: right after a power cut the clock can say "yesterday" until it is set - never clear then
+        self.assertIsNone(hr.check(forget=self.forget, since=self.since, now=lambda: self.day(2026, 10, 8, 22), db_path=self.db, history=self.log))
+        self.assertEqual(self.counts()["speed"], 2)
 
-    def test_shutdown_marks_restart_and_clears_marker_on_power_off(self):
-        with mock.patch.object(hr, "MARKER", self.marker):
-            with mock.patch.object(hr, "shutdown_kind", return_value="restart"):
-                self.assertEqual(hr.main(["x", "--shutdown"]), 0)
-            self.assertTrue(os.path.exists(self.marker))
-            with mock.patch.object(hr, "shutdown_kind", return_value=""):           # unknown: leave the app's choice alone
-                hr.main(["x", "--shutdown"])
-            self.assertTrue(os.path.exists(self.marker))
-            with mock.patch.object(hr, "shutdown_kind", return_value="poweroff"):
-                hr.main(["x", "--shutdown"])
-            self.assertFalse(os.path.exists(self.marker))
+    def test_forget_visited_wifi_uses_the_sudo_rule(self):
+        calls = []
 
-    def test_boot_never_fails_the_boot(self):
+        class P:
+            stdout = "Clearing visited-site WiFi...\n  deleted: Cafe Guest\n  kept (in use): Office\n  deleted: Store 12\n"
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return P()
+        self.assertEqual(hr.forget_visited_wifi(run), ["Cafe Guest", "Store 12"])
+        self.assertEqual(calls, [["sudo", "-n", "/usr/local/bin/wifi-clear"]])
+
+        def broken(argv, **kw):
+            raise OSError("no sudo")
+        self.assertIsNone(hr.forget_visited_wifi(broken))         # a failure never breaks the reset
+
+    def test_main_check_removes_the_old_marker_and_never_fails(self):
+        marker = os.path.join(os.path.dirname(self.db), "keep-history-once")
+        with open(marker, "w") as f:
+            f.write("restart\n")
         with open(self.db, "wb") as f:
             f.write(b"this is not a database")
-        with mock.patch.object(hr, "DB_PATH", self.db), mock.patch.object(hr, "MARKER", self.marker), \
+        with mock.patch.object(hr, "DB_PATH", self.db), mock.patch.object(hr, "OLD_MARKER", marker), \
+                mock.patch.object(hr, "forget_visited_wifi", lambda: None), \
                 mock.patch.object(hr, "HISTORY", self.log), mock.patch.object(hr, "SINCE", self.since):
-            self.assertEqual(hr.main(["x", "--boot"]), 0)
+            self.assertEqual(hr.main(["x", "--check"]), 0)
+            self.assertEqual(hr.main(["x", "--boot"]), 0)          # the earlier unit's names still work
+            self.assertEqual(hr.main(["x", "--shutdown"]), 0)
+        self.assertFalse(os.path.exists(marker))
 
     def test_usage(self):
         self.assertEqual(hr.main(["x"]), 64)

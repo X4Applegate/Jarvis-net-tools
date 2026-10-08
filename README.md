@@ -41,7 +41,8 @@ speedometer-style speed test with a bufferbloat grade. Everything is a phone-fir
 Also: a background **network monitor** (internet / gateway / DNS samples, outage log, scheduled speed tests), a printable
 **site report**, an optional **Cockpit** page, an optional **setup hotspot with a captive page** for joining Wi-Fi from a phone
 (on **Auto** it stays off while the Pi has a network and turns itself on after 2 minutes without one),
-a **fresh history at every power-on** (a restart keeps it) so each site report covers one visit,
+a **setup wizard** on the first start of each day (company -> location -> Wi-Fi -> main page; companies and locations
+are remembered), a **one-day history** (kept through restarts and power-offs, emptied when a new day starts) so one report covers a visit,
 and a small **agent API** (hashed, scoped bearer tokens) so other automations can read the Pi's state.
 
 ## How it is built (the interesting parts)

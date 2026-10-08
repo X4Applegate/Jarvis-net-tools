@@ -13,12 +13,28 @@ def band_freq(b,ch):
 def jr(o,code=200): return code, json.dumps(o).encode()
 class H(SimpleHTTPRequestHandler):
     hs_mode="auto"   # setup hotspot mode, shared by all requests (a real Pi keeps it in a file)
-    hist_since={"ts":NOW-5400,"reason":"power-on"}   # when the history was last emptied
+    hist_since={"ts":NOW-5400,"reason":"new-day"}   # when the history was last emptied
+    visit={"date":time.strftime("%Y-%m-%d"),"company":"Demo Coffee","location":"Main St","ts":NOW-3600}   # today's visit already done
+    companies=[{"name":"Demo Coffee","locations":["Main St","Airport"]},{"name":"Example Tea","locations":["Harbor"]}]
     def log_message(self,*a): pass
     def hotspot(self):
         return {"mode":H.hs_mode,"service":True,"ssid":"JarvisPi-Manage","active":H.hs_mode=="on","clients":0,"online":True,"fallback_in":None,"error":"","note":""}
     def do_API(self,method):
         path=self.path.split("?")[0]
+        if path=="/api/visit":
+            if method=="POST":
+                try: b=json.loads(getattr(self,"body",b"") or b"{}")
+                except Exception: b={}
+                if b.get("skip") is True: H.visit={"date":time.strftime("%Y-%m-%d"),"company":"","location":"","skipped":True}
+                elif not str(b.get("company","")).strip(): return jr({"error":"enter the company"},400)
+                else:
+                    c,l=str(b["company"]).strip(),str(b.get("location","")).strip()
+                    H.visit={"date":time.strftime("%Y-%m-%d"),"company":c,"location":l}
+                    old=next((x for x in H.companies if x["name"]==c),{"locations":[]})
+                    H.companies=[{"name":c,"locations":([l] if l else [])+[x for x in old["locations"] if x!=l]}]+[x for x in H.companies if x["name"]!=c]
+            v=H.visit; return jr({"ok":True,"needed":not v or v.get("date")!=time.strftime("%Y-%m-%d"),"visit":v,"companies":H.companies,"ssid":"Example WiFi","site_name":"Demo site"})
+        if path=="/api/wifi/scan" and method=="POST":
+            return jr({"networks":[{"ssid":"Example WiFi","signal":86,"security":"WPA2"},{"ssid":"Store Guest","signal":64,"security":"WPA2"},{"ssid":"Open Cafe","signal":40,"security":""}]})
         if path=="/api/hotspot":
             if method=="POST":
                 try: m=json.loads(getattr(self,"body",b"") or b"{}").get("mode")

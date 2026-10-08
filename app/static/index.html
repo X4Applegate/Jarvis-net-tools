@@ -37,6 +37,38 @@
     </div>
   </div>
 
+  <!-- setup wizard: first start of each day (and Settings > Start New Visit) -->
+  <div id="wizard" class="screen hidden">
+    <div class="wz">
+      <div class="wz-top">
+        <img src="icon-192.png" alt="" width="40" height="40">
+        <div class="wz-head"><div id="wz-step" class="wz-step">Step 1 of 3</div><h1 id="wz-title">Who is this visit for?</h1></div>
+        <button id="wz-skip" class="mini">Skip</button>
+      </div>
+      <section id="wz-p1" class="wz-pane">
+        <div id="wz-companies" class="wz-chips"></div>
+        <input type="text" id="wz-company" placeholder="New company" maxlength="40" autocomplete="off">
+        <button id="wz-next1" class="block">Next</button>
+      </section>
+      <section id="wz-p2" class="wz-pane hidden">
+        <div id="wz-locations" class="wz-chips"></div>
+        <input type="text" id="wz-location" placeholder="Location / store (optional)" maxlength="40" autocomplete="off">
+        <div class="btnrow"><button id="wz-back2" class="util narrow">Back</button><button id="wz-next2" class="wz-grow">Next</button></div>
+      </section>
+      <section id="wz-p3" class="wz-pane hidden">
+        <div id="wz-now" class="wz-now"></div>
+        <div id="wz-nets" class="wz-list"></div>
+        <div id="wz-join" class="wz-join hidden">
+          <div id="wz-join-ssid" class="wz-join-ssid"></div>
+          <input type="password" id="wz-pass" placeholder="Wi-Fi password" autocomplete="off">
+          <div class="btnrow"><button id="wz-join-cancel" class="util narrow">Cancel</button><button id="wz-connect" class="wz-grow">Connect</button></div>
+        </div>
+        <div id="wz-msg" class="wz-msg muted small"></div>
+        <div class="btnrow"><button id="wz-rescan" class="util narrow">Scan again</button><button id="wz-done" class="wz-grow">Continue</button></div>
+      </section>
+    </div>
+  </div>
+
   <div id="app" class="screen hidden">
     <header id="appbar">
       <div class="ab-title">
@@ -257,6 +289,7 @@
             </select>
           </div>
           <button id="set-save-site" class="block">Save</button>
+          <button id="set-new-visit" class="util block">Start New Visit</button>
           <p class="muted small">Each auto speed test uses ~1 GB of data — turn it down on metered sites.</p>
         </div>
       </section>
@@ -322,7 +355,7 @@
           <button id="btn-report2" class="rowbtn">Site Report</button>
           <button id="btn-hist-clear" class="rowbtn danger-text">Clear History Now</button>
         </div>
-        <div class="pad tight"><p class="muted small">History (speed tests, uptime and outages, tool results) starts empty at every power-on after a shut down or power cut, so each site report covers one visit. A restart keeps it.</p></div>
+        <div class="pad tight"><p class="muted small">History (speed tests, uptime and outages, tool results) is kept all day, through restarts and power-offs, so one report can cover a whole visit. It is emptied when a new day starts.</p></div>
       </section>
       <section class="sect">
         <h2 class="sect-h">Power</h2>

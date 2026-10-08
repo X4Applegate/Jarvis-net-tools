@@ -18,7 +18,7 @@ const page = await ctx.newPage(); watch(page);
 const posts = []; page.on("request", r => { if (r.url().includes("/api/history/clear")) posts.push(r.method()); });
 await page.goto("http://127.0.0.1:8099/index.html#settings"); await settle(page, 900);
 let s = await since(page);
-ok(/·\s*power-on$/.test(s) && /\d/.test(s), "History since shows the power-on time: " + s);
+ok(/·\s*new day$/.test(s) && /\d/.test(s), "History since shows when the new day started it: " + s);
 const rows = await page.$$eval("#page-settings .sect", ss => { const m = ss.find(x => /Maintenance/.test(x.textContent)); return [...m.querySelectorAll(".rowbtn, .row .lbl")].map(e => e.textContent.trim()); });
 ok(rows[0] === "History since" && rows.at(-1) === "Clear History Now", "Maintenance: History since first, Clear History Now last: " + rows.join(" | "));
 ok(await page.locator("#btn-hist-clear").evaluate(b => b.classList.contains("danger-text")), "Clear History Now is shown as a danger action");

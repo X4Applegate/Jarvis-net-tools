@@ -25,6 +25,7 @@ kill %1
 | `e2e-power` | Info header ⏻ + Settings > Power: confirm dialog (Cancel/Esc/backdrop send nothing), shut down countdown + Pi 5 vs older-Pi wake hint, restart waits for the Pi to go down and come back then reloads, "didn't restart", refused action, 800x480 touch screen |
 | `e2e-hotspot` | Settings > Setup Hotspot: Off / Auto / On (POST body, selection + aria), live status (network, fallback countdown, Turning on/off…, phones connected, service down, escaped errors), polling only while Settings is open, choice survives a reload, 800x480 touch screen |
 | `e2e-history` | Settings > Maintenance: History since (power-on / cleared by hand), Clear History Now asks first (Cancel sends nothing), clears, survives a reload, 800x480 touch screen |
+| `e2e-wizard` | Setup wizard: shows on the first start of a day only, company buttons + new company, Back, locations, visit saved after step 2, Wi-Fi list (saved / connected / locked), wrong then right password, saved network without password, Continue -> Info, Skip, Settings > Start New Visit, 800x480 and keyboard-up 800x283 |
 
 `tests/live.mjs <url>` is a tiny smoke check of a *deployed* app (login screen renders, no JS errors).
 

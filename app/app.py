@@ -666,6 +666,13 @@ def devices():
 
 
 _last_devices = []
+_last_devices_ts = 0
+
+
+def cached_devices():
+    """The last device scan, unless the history has been emptied since (new day / Clear History)."""
+    h = history_since()
+    return _last_devices if _last_devices and (not h or _last_devices_ts >= h["ts"]) else []
 
 
 def resolve_name(ip):
@@ -819,7 +826,7 @@ def classify(h, ports, mdns, ssdp, title, gw):
 def scan_devices():
     """arp-scan the real LAN, then identify every device from six sources: local OUI,
     online OUI, mDNS/NetBIOS/rDNS names, mDNS services, UPnP/SSDP, open ports + web titles."""
-    global _last_devices
+    global _last_devices, _last_devices_ts
     iface, gw = default_iface(), default_gw()
     local_ip = (re.search(r"inet (\d+\.\d+\.\d+\.\d+)", run(["ip", "-4", "-o", "addr", "show", iface])) or [None, ""])[1]
     out = run(["sudo", PRIV, "arp-scan", iface], timeout=60)
@@ -830,7 +837,7 @@ def scan_devices():
             seen.add(m.group(1))
             hosts.append({"ip": m.group(1), "mac": m.group(2), "vendor": re.sub(r"\s*\(DUP: \d+\)", "", m.group(3)).strip(), "name": "", "type": "", "info": ""})
     if not hosts:
-        _last_devices = hosts
+        _last_devices, _last_devices_ts = hosts, time.time()
         return hosts
     ips = [h["ip"] for h in hosts]
     unknown_macs = [h["mac"] for h in hosts if "unknown" in h["vendor"].lower() and "locally administered" not in h["vendor"].lower()]
@@ -865,14 +872,14 @@ def scan_devices():
         if ports: bits.append("ports " + ",".join(sorted(ports, key=int)))
         h["info"] = " · ".join(bits)[:160]
     hosts.sort(key=lambda h: [int(x) for x in h["ip"].split(".")])
-    _last_devices = hosts
+    _last_devices, _last_devices_ts = hosts, time.time()
     return hosts
 
 
 @app.get("/api/devices.csv")
 @require_login
 def devices_csv():
-    rows = _last_devices or scan_devices()
+    rows = cached_devices() or scan_devices()
     def cell(x):
         return '"' + str(x).replace('"', "'") + '"'
     csv = "ip,name,type,vendor,mac,info\n" + "".join(
@@ -1457,7 +1464,7 @@ def lan_services():
     if not re.match(r"^\d+\.\d+\.\d+\.\d+/\d+$", cidr):
         return {"subnet": cidr or "?", "found": found}
     out = run(["sudo", PRIV, "nmap", "-Pn", "-T4", "--open", "-p", ",".join(LAN_PORTS), "-oG", "-", cidr], timeout=60)
-    names = {h["ip"]: h["name"] for h in _last_devices if h.get("name")}
+    names = {h["ip"]: h["name"] for h in cached_devices() if h.get("name")}
     for line in out.splitlines():
         m = re.match(r"^Host:\s+(\S+).*Ports:\s+(.+)$", line)
         if not m:
@@ -1644,27 +1651,14 @@ def shutdown():
         return jsonify({"error": "action must be shutdown or restart"}), 400
     restart = action == "restart"
     log_history("Restart" if restart else "Shutdown", None, "clean %s requested from the app" % action)
-    keep_history_next_boot(restart)       # a restart keeps the history; the next power-on after a shut down starts empty
     subprocess.Popen(["sudo", "shutdown", "-r" if restart else "-h", "now"])
     return jsonify({"ok": True, "action": action, "power_button": has_power_button()})
 
 
 # ---- history reset ---------------------------------------------------------
-# Every power-on starts with an empty history so a site report covers this visit only: jarvis-history-reset.service
-# empties it at boot unless the Pi was only restarted (the marker below), and Settings > Clear History does it by hand.
-HISTORY_MARKER = "/var/lib/jarvis-nettools/keep-history-once"
+# The history lasts one day: kept through restarts and power-offs (one report for a whole site visit, room after room),
+# emptied when a new day starts by jarvis-history-reset (at boot + every 10 min), or by hand: Settings > Clear History.
 HISTORY_SINCE = "/var/lib/jarvis-nettools/history-since.json"
-
-
-def keep_history_next_boot(keep):
-    try:
-        if keep:
-            with open(HISTORY_MARKER, "w") as f:
-                f.write("restart\n")
-        elif os.path.exists(HISTORY_MARKER):
-            os.remove(HISTORY_MARKER)
-    except OSError:
-        pass                              # the boot service decides on its own then (reboot vs power-off)
 
 
 def history_since():
@@ -1678,7 +1672,7 @@ def history_since():
 
 def clear_history(reason):
     """Same as `jarvis-history-reset --now`: speed tests, monitor samples, outages, the tool log, the last device scan."""
-    global _last_devices
+    global _last_devices, _last_devices_ts
     with db() as c:
         for t in ("speed", "samples", "events"):
             c.execute(f"DELETE FROM {t}")
@@ -1882,6 +1876,72 @@ def public_settings(c):
             "hostname": run(["hostname"]).strip(), "default_checks": [s["name"] for s in DEFAULT_SERVICES]}
 
 
+# ---- site visit (setup wizard) ---------------------------------------------
+# The first start of each day asks who the visit is for (company + location, both remembered for next time) and which
+# Wi-Fi to use; the answer becomes the site name on the header and in reports. One visit per day, like the history.
+VISIT_PATH = "/var/lib/jarvis-nettools/visit.json"
+NAME_CHARS = re.compile(r"[^\w .&'()/-]")
+
+
+def clean_name(v, n=40):
+    return re.sub(r"\s+", " ", NAME_CHARS.sub("", str(v or ""))).strip()[:n]
+
+
+def today():
+    return time.strftime("%Y-%m-%d")
+
+
+def load_visit():
+    try:
+        with open(VISIT_PATH) as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def visit_state():
+    v, c = load_visit(), load_cfg()
+    companies = [x for x in c.get("companies", []) if isinstance(x, dict) and x.get("name")]
+    return {"needed": not v or v.get("date") != today(), "visit": v, "companies": companies,
+            "ssid": active_ssid() or "", "site_name": c.get("site_name", "")}
+
+
+@app.get("/api/visit")
+@require_login
+def visit_get():
+    return jsonify(visit_state())
+
+
+@app.post("/api/visit")
+@require_login
+def visit_set():
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
+    c = load_cfg()
+    if data.get("skip") is True:
+        v = {"date": today(), "ts": int(time.time()), "company": "", "location": "", "skipped": True}
+    else:
+        company, location = clean_name(data.get("company")), clean_name(data.get("location"))
+        if not company:
+            return jsonify({"error": "enter the company"}), 400
+        v = {"date": today(), "ts": int(time.time()), "company": company, "location": location}
+        # remember it: most recent company first, most recent location first
+        companies = [x for x in c.get("companies", []) if isinstance(x, dict) and x.get("name")]
+        old = next((x for x in companies if x["name"].lower() == company.lower()), {"locations": []})
+        locs = [l for l in old.get("locations", []) if isinstance(l, str) and l.lower() != location.lower()]
+        entry = {"name": company, "locations": ([location] if location else []) + locs[:49]}
+        c["companies"] = [entry] + [x for x in companies if x["name"].lower() != company.lower()][:49]
+        c["site_name"] = (company + (" - " + location if location else ""))[:60]
+        save_cfg(c)
+    tmp = VISIT_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(v, f)
+    os.replace(tmp, VISIT_PATH)
+    log_history("Site visit", c.get("site_name") or None, "skipped" if v.get("skipped") else "started")
+    return jsonify({"ok": True, **visit_state()})
+
+
 @app.get("/api/settings")
 @require_login
 def settings_get():
@@ -2017,7 +2077,7 @@ def gather_report(site):
         # most/all failing at once = the link dropped mid-report (e.g. a band switch), not 15 separate faults
         time.sleep(4)
         checks = services().get_json()["results"]
-    devs = _last_devices or scan_devices()
+    devs = cached_devices() or scan_devices()
     chan = channel().get_json()
     return {"site": site, "host": run(["hostname"]).strip(), "when": time.strftime("%Y-%m-%d %H:%M %Z"), "conn": conn,
             "speed": speed, "mon": mon, "aps": apsd["aps"], "checks": checks, "devices": devs,

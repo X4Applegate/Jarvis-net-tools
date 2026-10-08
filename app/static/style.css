@@ -261,6 +261,30 @@ canvas#home-gauge { flex: 0 0 auto; width: 138px; height: 112px; display: block;
 .gradechip.sm { min-width: 28px; height: 24px; font-size: 14px; border-radius: 7px; margin-left: 4px; font-style: normal; }
 .hs-vals.empty b { color: #475569; }
 
+/* ---- setup wizard (first start of each day) ---- */
+#wizard .wz { max-width: 620px; margin: 0 auto; padding: 14px var(--pad) 28px; }
+.wz-top { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.wz-top img { border-radius: 10px; flex: 0 0 auto; }
+.wz-head { flex: 1 1 auto; min-width: 0; }
+.wz-head h1 { font-size: 22px; line-height: 1.2; }
+.wz-step { color: var(--muted); font-size: 13px; }
+.wz-top .mini { flex: 0 0 auto; }
+.wz-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.wz-chips button { margin: 0; height: 48px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; background: transparent; color: var(--text); border-color: var(--border); font-weight: 500; }
+.wz-chips button.on { border-color: var(--orange); color: var(--orange); }
+.wz-grow { flex: 1 1 auto; margin: 0; }
+.wz-pane .btnrow .narrow { margin: 0; }
+.wz-now { background: var(--row); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+.wz-list { margin-bottom: 8px; }
+.wz-list button.net { display: flex; width: 100%; align-items: center; gap: 10px; height: 52px; margin: 0 0 6px; padding: 0 14px; background: var(--row);
+  color: var(--text); border: 1px solid var(--border); border-radius: 12px; font-weight: 500; text-align: left; }
+.wz-list .net .n { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wz-list .net .s { flex: 0 0 auto; color: var(--muted); font-size: 13px; font-weight: 400; }
+.wz-list .net .tag { flex: 0 0 auto; font-size: 12px; color: var(--ok); }
+.wz-join { background: var(--row); border-radius: 12px; padding: 12px 14px 4px; margin-bottom: 10px; }
+.wz-join-ssid { font-weight: 600; margin-bottom: 8px; }
+.wz-msg { min-height: 1.2em; margin: 4px 0 10px; white-space: pre-line; }
+
 /* ---- power dialog (Info header ⏻, Settings > Power) ---- */
 #power-dlg { width: min(92vw, 440px); padding: 0; border: 1px solid var(--border); border-radius: 16px; background: var(--head); color: var(--text); }
 #power-dlg::backdrop { background: rgba(3, 8, 18, .72); }

@@ -1,0 +1,10 @@
+[Unit]
+Description=Jarvis Net Tools: check every 10 minutes whether a new day has started (then empty the history)
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*:0/10
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

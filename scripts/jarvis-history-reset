@@ -1,16 +1,18 @@
 #!/usr/bin/python3 -I
-"""jarvis-history-reset - every power-on starts with an empty history, so a site report covers this visit only.
+"""jarvis-history-reset - the history lasts one day: kept through restarts and power-offs, emptied when a new day starts.
 
-Install as /usr/local/bin/jarvis-history-reset (owner root, mode 755); run by jarvis-history-reset.service as the app user.
+Install as /usr/local/bin/jarvis-history-reset (owner root, mode 755); run as the app user by
+jarvis-history-reset.service (at boot, before the app and the monitor) and jarvis-history-reset.timer (every 10 minutes,
+so midnight is caught while the Pi runs, and a clock that was wrong at boot - no RTC battery - is caught once it is set).
 
-  --boot      at power-on, before the app and the monitor start: empties the history, unless the Pi was only restarted
-  --shutdown  at shutdown: a restart (reboot.target queued) leaves a one-time marker so the next boot keeps the history;
-              a power-off (poweroff.target / halt.target) removes any marker. A power cut runs nothing, so the next boot clears.
-  --now       empty it right away (same as Settings > Clear History in the app)
+  --check   empty the history if it was last emptied before today (local time); otherwise do nothing
+  --now     empty it right away (same as Settings > Clear History Now in the app)
 
-"History" = speed tests, monitor samples and outages (netmon.db) and the tool log (history.log). Settings, saved
-devices, AP names, Wi-Fi networks, the vendor cache and the agent access log are kept.
+"History" = speed tests, monitor samples and outages (netmon.db) and the tool log (history.log). On a new day the saved
+Wi-Fi of visited sites is forgotten too (`wifi-clear`: keeps your own networks and the one in use right now).
+Settings, saved devices, companies/locations, AP names, the vendor cache and the agent access log are kept.
 """
+import datetime
 import json
 import os
 import sqlite3
@@ -20,8 +22,8 @@ import time
 
 DB_PATH = "/var/lib/jarvis-nettools/netmon.db"
 HISTORY = "/opt/jarvis-nettools/history.log"
-MARKER = "/var/lib/jarvis-nettools/keep-history-once"       # "the next boot is a restart: keep the history"
 SINCE = "/var/lib/jarvis-nettools/history-since.json"       # when (and why) the history was last emptied
+OLD_MARKER = "/var/lib/jarvis-nettools/keep-history-once"   # from the earlier power-on rule; removed when seen
 TABLES = ("speed", "samples", "events")
 
 
@@ -55,57 +57,48 @@ def wipe(reason, db_path=None, history=None, since=None, now=time.time):
     return removed
 
 
-def shutdown_kind(jobs=None):
-    """'restart', 'poweroff' or '' (unknown) from the jobs systemd has queued while shutting down."""
-    if jobs is None:
-        try:
-            jobs = subprocess.run(["systemctl", "list-jobs", "--no-legend", "--no-pager"], capture_output=True,
-                                  text=True, timeout=10).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return ""
-    names = {line.split()[1] for line in jobs.splitlines() if len(line.split()) > 1}
-    if names & {"reboot.target", "kexec.target", "soft-reboot.target"}:
-        return "restart"
-    if names & {"poweroff.target", "halt.target"}:
-        return "poweroff"
-    return ""
-
-
-def keep_next_boot(keep, marker=None):
-    marker = marker or MARKER
-    if keep:
-        with open(marker, "w") as f:
-            f.write("restart\n")
-    else:
-        try:
-            os.remove(marker)
-        except FileNotFoundError:
-            pass
-
-
-def boot(marker=None, **kw):
-    marker = marker or MARKER
-    if os.path.exists(marker):
-        keep_next_boot(False, marker)
-        log("restarted: history kept")
+def last_reset_day(since=None):
+    """Local date the history was last emptied, or None (never / unreadable)."""
+    try:
+        with open(since or SINCE) as f:
+            return datetime.date.fromtimestamp(int(json.load(f)["ts"]))
+    except (OSError, ValueError, KeyError, TypeError):
         return None
-    removed = wipe("power-on", **kw)
-    log("power-on after a power-off or power cut: history cleared %s" % (removed or "(nothing yet)"))
+
+
+def forget_visited_wifi(run=subprocess.run):
+    """Delete the saved Wi-Fi of visited sites (passwords included) through the app's existing sudo rule."""
+    try:
+        p = run(["sudo", "-n", "/usr/local/bin/wifi-clear"], capture_output=True, text=True, timeout=60)
+        gone = [l.strip()[len("deleted: "):] for l in p.stdout.splitlines() if l.strip().startswith("deleted: ")]
+        log("visited Wi-Fi forgotten: %s" % (", ".join(gone) or "none saved"))
+        return gone
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"could not forget visited Wi-Fi: {e!r}")
+        return None
+
+
+def check(since=None, now=time.time, forget=None, **kw):
+    """Empty the history when the day has changed since the last reset. Returns the removed rows, or None if kept."""
+    today, last = datetime.date.fromtimestamp(now()), last_reset_day(since)
+    if last is not None and last >= today:
+        return None
+    removed = wipe("new-day", since=since, now=now, **kw)
+    log("new day (last reset %s): history cleared %s" % (last or "never", removed or "(nothing yet)"))
+    (forget or forget_visited_wifi)()
     return removed
 
 
 def main(argv):
-    if argv[1:] == ["--boot"]:
+    if argv[1:] == ["--check"] or argv[1:] == ["--boot"]:   # --boot: name used by the earlier unit
         try:
-            boot()
+            if os.path.exists(OLD_MARKER):
+                os.remove(OLD_MARKER)
+            check()
         except Exception as e:            # never hold up the boot: the app starts either way
-            log(f"could not clear the history: {e!r}")
+            log(f"could not check/clear the history: {e!r}")
         return 0
-    if argv[1:] == ["--shutdown"]:
-        kind = shutdown_kind()
-        if kind:
-            keep_next_boot(kind == "restart")
-        log(f"shutting down ({kind or 'kind unknown'}): next boot {'keeps' if kind == 'restart' else 'clears'} the history")
+    if argv[1:] == ["--shutdown"]:        # the earlier unit's ExecStop: nothing to do any more
         return 0
     if argv[1:] == ["--now"]:
         log("history cleared %s" % (wipe("manual") or "(nothing yet)"))

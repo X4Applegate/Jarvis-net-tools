@@ -157,7 +157,116 @@ async function showApp() {
   $("login").classList.add("hidden"); $("app").classList.remove("hidden");
   await loadSettings(true);
   goto(location.hash.slice(1) || "home");
+  try { const v = await api("/api/visit"); if (v.needed) openWizard(v); } catch (e) {}   // first start of the day
 }
+// ---------- setup wizard: company -> location -> Wi-Fi -> main page ----------
+// Shown on the first start of each day (one visit = one day, like the history) and from Settings > Start New Visit.
+// The visit is saved after step 2, so skipping the Wi-Fi step still names the site.
+const wz = { company: "", location: "", companies: [], ssid: "", saved: [], pick: "" };
+const bars = (n) => n.signal >= 70 ? "▂▄▆█" : n.signal >= 50 ? "▂▄▆" : n.signal >= 30 ? "▂▄" : "▂";
+function wzStep(n, title) {
+  [1, 2, 3].forEach(i => $("wz-p" + i).classList.toggle("hidden", i !== n));
+  $("wz-step").textContent = "Step " + n + " of 3";
+  $("wz-title").textContent = title || ["Who is this visit for?", "Which location?", "Connect to Wi-Fi"][n - 1];
+  window.scrollTo(0, 0);
+}
+function wzChips(box, names, current, onPick) {
+  box.innerHTML = "";
+  names.forEach(name => {
+    const b = document.createElement("button"); b.textContent = name; b.classList.toggle("on", name === current);
+    b.onclick = () => onPick(name); box.appendChild(b);
+  });
+}
+async function openWizard(v) {
+  try { v = v || await api("/api/visit"); } catch (e) { show(e.message); return; }
+  wz.companies = v.companies || []; wz.ssid = v.ssid || "";
+  const last = v.visit && !v.visit.skipped ? v.visit : null;
+  wz.company = last ? last.company : ""; wz.location = last ? last.location : "";
+  $("app").classList.add("hidden"); $("wizard").classList.remove("hidden");
+  $("wz-company").value = ""; $("wz-location").value = ""; $("wz-msg").textContent = "";
+  wzChips($("wz-companies"), wz.companies.map(c => c.name), wz.company, (name) => { wz.company = name; wzLocations(); });
+  wzStep(1);
+}
+function closeWizard() {
+  $("wizard").classList.add("hidden"); $("app").classList.remove("hidden");
+  loadSettings(true); goto("home");
+}
+function wzLocations() {
+  const c = wz.companies.find(x => x.name.toLowerCase() === wz.company.toLowerCase());
+  $("wz-location").value = "";
+  wzChips($("wz-locations"), c ? c.locations : [], wz.location, (name) => { wz.location = name; wzSave(); });
+  wzStep(2, wz.company + ": which location?");
+}
+$("wz-next1").onclick = () => {
+  const typed = $("wz-company").value.trim();
+  if (typed) wz.company = typed;
+  if (!wz.company) { $("wz-company").placeholder = "Type the company name first"; $("wz-company").focus(); return; }
+  wz.location = ""; wzLocations();
+};
+$("wz-company").onkeydown = (e) => { if (e.key === "Enter") $("wz-next1").click(); };
+$("wz-back2").onclick = () => wzStep(1);
+$("wz-next2").onclick = () => { wz.location = $("wz-location").value.trim() || wz.location || ""; wzSave(); };
+$("wz-location").onkeydown = (e) => { if (e.key === "Enter") $("wz-next2").click(); };
+async function wzSave() {
+  try {
+    const d = await api("/api/visit", { company: wz.company, location: wz.location });
+    if (!d.ok) { $("wz-msg").textContent = d.error || "Could not save."; return; }
+    wz.companies = d.companies || wz.companies; wz.ssid = d.ssid || "";
+  } catch (e) { return; }
+  wzStep(3); wzWifi();
+}
+$("wz-skip").onclick = async () => {
+  if ($("wz-p3").classList.contains("hidden")) { try { await api("/api/visit", { skip: true }); } catch (e) {} }
+  closeWizard();
+};
+function wzNow() {
+  $("wz-now").innerHTML = wz.ssid ? "Connected to <b>" + esc(wz.ssid) + "</b><i class='dot ok'></i>" : "Not connected to Wi-Fi yet<i class='dot warn'></i>";
+  $("wz-done").textContent = wz.ssid ? "Continue" : "Continue without Wi-Fi";
+}
+async function wzWifi() {
+  wzNow(); $("wz-join").classList.add("hidden"); $("wz-nets").innerHTML = "<div class='muted small'>Scanning for networks…</div>";
+  try {
+    const [s, saved] = await Promise.all([api("/api/wifi/scan", {}), api("/api/wifi/saved")]);
+    wz.saved = saved.profiles || [];
+    const box = $("wz-nets"); box.innerHTML = "";
+    (s.networks || []).slice(0, 12).forEach(n => {
+      const b = document.createElement("button"); b.className = "net";
+      const isSaved = wz.saved.includes(n.ssid), cur = n.ssid === wz.ssid;
+      b.innerHTML = "<span class='n'>" + esc(n.ssid) + "</span>" + (cur ? "<span class='tag'>connected</span>" : isSaved ? "<span class='tag'>saved</span>" : "") +
+        "<span class='s'>" + (n.security && n.security !== "--" ? "🔒 " : "") + bars(n) + "</span>";
+      b.onclick = () => wzPick(n, isSaved);
+      box.appendChild(b);
+    });
+    if (!box.children.length) box.innerHTML = "<div class='muted small'>No networks found. Scan again, or continue with Ethernet.</div>";
+  } catch (e) { $("wz-nets").textContent = e.message; }
+}
+function wzPick(n, isSaved) {
+  wz.pick = n.ssid;
+  if (n.ssid === wz.ssid) { $("wz-msg").textContent = "Already connected to " + n.ssid + "."; return; }
+  if (isSaved || !n.security || n.security === "--") { wzJoin(""); return; }
+  $("wz-join-ssid").textContent = n.ssid; $("wz-pass").value = ""; $("wz-join").classList.remove("hidden"); $("wz-pass").focus();
+}
+async function wzJoin(pw) {
+  $("wz-join").classList.add("hidden"); $("wz-msg").textContent = "Connecting to " + wz.pick + "… (up to 45 s)";
+  $("wz-done").disabled = true;
+  try {
+    const d = await api("/api/wifi/join", { ssid: wz.pick, password: pw });
+    if (d.ok) {
+      try { wz.ssid = (await api("/api/visit")).ssid || wz.pick; } catch (e) { wz.ssid = wz.pick; }
+      $("wz-msg").textContent = "✅ Connected to " + wz.ssid + "."; wzNow();
+    } else {
+      $("wz-msg").textContent = "❌ " + String(d.output || d.error || "Could not connect.").split("\n")[0];
+      if (!wz.saved.includes(wz.pick)) { $("wz-join-ssid").textContent = wz.pick; $("wz-join").classList.remove("hidden"); }
+    }
+  } catch (e) { $("wz-msg").textContent = e.message; }
+  $("wz-done").disabled = false;
+}
+$("wz-connect").onclick = () => wzJoin($("wz-pass").value);
+$("wz-pass").onkeydown = (e) => { if (e.key === "Enter") $("wz-connect").click(); };
+$("wz-join-cancel").onclick = () => $("wz-join").classList.add("hidden");
+$("wz-rescan").onclick = () => wzWifi();
+$("wz-done").onclick = () => closeWizard();
+$("set-new-visit").onclick = () => openWizard();
 $("login-btn").onclick = async () => {
   $("login-err").textContent = "";
   try {
@@ -994,7 +1103,7 @@ function applySettings() {
   renderServiceChecks(); renderSavedDevices();
 }
 function renderHistorySince(h) {
-  const why = { "power-on": "power-on", manual: "cleared by hand" };
+  const why = { "new-day": "new day", "power-on": "power-on", manual: "cleared by hand" };
   $("hist-since").textContent = h && h.ts ? fmtTs(h.ts) + " · " + (why[h.reason] || "cleared") : "—";
 }
 $("btn-hist-clear").onclick = async () => {

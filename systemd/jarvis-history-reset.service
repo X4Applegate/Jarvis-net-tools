@@ -1,18 +1,15 @@
 [Unit]
-Description=Jarvis Net Tools: start every power-on with an empty history (kept across a restart)
-# runs before the app and the monitor write anything, and (stopping in reverse order) after they have stopped;
-# After=dbus.service keeps D-Bus up for `systemctl list-jobs` when the shutdown check runs
-After=local-fs.target dbus.service
+Description=Jarvis Net Tools: the history lasts one day (emptied when a new day starts)
+# at boot: runs before the app and the monitor write anything; jarvis-history-reset.timer runs it again every 10 minutes
+After=local-fs.target
 Before=jarvis-nettools.service jarvis-netmon.service
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
 User=nettools
 Group=nettools
-ExecStart=/usr/local/bin/jarvis-history-reset --boot
-ExecStop=/usr/local/bin/jarvis-history-reset --shutdown
-NoNewPrivileges=true
+ExecStart=/usr/local/bin/jarvis-history-reset --check
+# no NoNewPrivileges: on a new day it forgets visited Wi-Fi through sudo (/usr/local/bin/wifi-clear, already in sudoers)
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
