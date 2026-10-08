@@ -64,6 +64,23 @@ for a setup hotspot. Lessons that cost real time: the adapter must enumerate at 
 (on a 3 A source it throttles under load); turn Wi-Fi power save off; and the Wi-Fi link rate is a raw rate — expect a
 fraction of it in practice.
 
+### The tester (photos)
+
+A Raspberry Pi 5 in a case with a 4.3" touch screen, the USB Wi-Fi 6E adapter on top, running from a USB-C power bank. The
+screen boots straight into the app (`kiosk/`: a Wayland kiosk with an on-screen keyboard; it turns off after 30 minutes
+without a touch). Private network details in the photos are blurred.
+
+<p>
+  <img src="docs/photos/01-setup.jpg" width="32%" alt="Raspberry Pi 5 tester with the Wi-Fi 6E adapter on top and a USB-C power bank">
+  <img src="docs/photos/02-info-screen.jpg" width="32%" alt="Info page on the 4.3-inch touch screen">
+  <img src="docs/photos/03-speed-upload.jpg" width="32%" alt="Speedometer during the upload phase">
+</p>
+<p>
+  <img src="docs/photos/04-speed-result.jpg" width="32%" alt="Speed test result tiles and the Mbps-over-time trace">
+  <img src="docs/photos/06-bufferbloat-grade.jpg" width="32%" alt="Speed test result with the bufferbloat grade">
+  <img src="docs/photos/05-ookla-check.jpg" width="32%" alt="The same test cross-checked on speedtest.net">
+</p>
+
 ## Security
 
 One app password (scrypt hash), login throttling, a minimal sudo surface, strict CSP and cookie flags, and VPN-only by design.
@@ -76,8 +93,9 @@ app/            Flask backend (app.py), auth helpers, network monitor, front end
 scripts/        root helper (jarvis-priv), wifi-clear, token tool, deploy helpers
 splash/ systemd/ udev   optional setup hotspot, captive page and service units (placeholders, not for copying as-is)
 cockpit-nettools/       optional Cockpit page
+kiosk/          touch-screen kiosk for the Pi's own display (labwc + Chromium app window + on-screen keyboard)
 dev/            mock Pi API + Playwright UI suites, backend security tests
-docs/screenshots/       images used above
+docs/screenshots/ docs/photos/   images used above (photos: metadata stripped, private details blurred)
 ```
 
 ## License and credits

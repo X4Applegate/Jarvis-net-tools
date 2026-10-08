@@ -1,0 +1,22 @@
+#!/bin/bash
+# Jarvis kiosk browser: Chromium full screen on the app over loopback (trusted by the app = no login on the Pi's own screen).
+# Exactly one per kiosk session: restarts Chromium if it exits, ends when the labwc session ends.
+URL="http://127.0.0.1:8092/?kiosk=1"
+PROFILE="$HOME/.config/jarvis-kiosk"
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/jarvis-kiosk-browser.lock"
+flock -n 9 || exit 0                                    # another launcher already runs this session
+alive() { [ -z "${LABWC_PID:-}" ] || kill -0 "$LABWC_PID" 2>/dev/null; }
+while alive; do
+  for _ in $(seq 1 90); do curl -fsS -o /dev/null --max-time 2 "$URL" && break; sleep 1; done
+  rm -rf "$PROFILE/Default/Sessions"                     # always start with exactly one tab
+  # never show "Restore pages?" after a power cut
+  sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/; s/"exited_cleanly":false/"exited_cleanly":true/' "$PROFILE/Default/Preferences" 2>/dev/null
+  chromium --app="$URL" --start-maximized --user-data-dir="$PROFILE" \
+    --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3 \
+    --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
+    --disable-features=Translate,MediaRouter,OptimizationHints \
+    --overscroll-history-navigation=0 --disable-pinch --check-for-update-interval=31536000 \
+    --password-store=basic --touch-events=enabled --hide-scrollbars \
+    9>&-
+  sleep 2
+done
