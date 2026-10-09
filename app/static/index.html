@@ -289,6 +289,7 @@
             </select>
           </div>
           <button id="set-save-site" class="block">Save</button>
+          <button id="set-finish-visit" class="block">Finish Visit</button>
           <button id="set-new-visit" class="util block">Start New Visit</button>
           <p class="muted small">Each auto speed test uses ~1 GB of data — turn it down on metered sites.</p>
         </div>
@@ -358,6 +359,11 @@
         <div class="pad tight"><p class="muted small">History (speed tests, uptime and outages, tool results) is kept all day, through restarts and power-offs, so one report can cover a whole visit. It is emptied when a new day starts.</p></div>
       </section>
       <section class="sect">
+        <h2 class="sect-h">Saved Reports</h2>
+        <div id="rep-list" class="rows muted small"><div class="empty">No saved reports yet.</div></div>
+        <div class="pad tight"><p class="muted small">Finish Visit saves the site report here before it clears the history. Reports stay on the Pi until you delete them.</p></div>
+      </section>
+      <section class="sect">
         <h2 class="sect-h">Power</h2>
         <div class="rows"><button id="btn-shutdown" class="rowbtn danger-text">Shut Down Pi (safe)</button></div>
       </section>
@@ -387,6 +393,29 @@
           <button id="power-cancel" class="util" autofocus>Cancel</button>
         </div>
       </div>
+    </dialog>
+
+    <!-- Finish Visit: progress, then what next -->
+    <dialog id="finish-dlg" aria-labelledby="finish-title">
+      <div class="dlg-body">
+        <h2 id="finish-title">Finishing the visit…</h2>
+        <p id="finish-msg" class="muted"></p>
+        <div id="finish-btns" class="hidden">
+          <button id="finish-off" class="danger">Shut Down</button>
+          <button id="finish-view" class="util">View Report</button>
+          <button id="finish-next" class="util">Next Visit</button>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- saved report viewer (inside the app: the touch screen has no window bar to close a new window) -->
+    <dialog id="report-dlg" aria-labelledby="report-title">
+      <div class="rep-bar">
+        <span id="report-title" class="rep-title"></span>
+        <a id="report-dl" class="rep-dl" href="#">Download</a>
+        <button id="report-close" class="mini">Close</button>
+      </div>
+      <div id="report-body" class="rep-body"></div>
     </dialog>
 
     <!-- bottom tab bar -->

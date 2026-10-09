@@ -5,7 +5,7 @@
   "description": "Mock Pi API + Playwright suites for app/static (run against the mock, nothing touches a real Pi)",
   "scripts": {
     "mock": "python3 mock_server.py ../../app/static 8099",
-    "test": "for t in e2e e2e-inline e2e-live e2e-live2 e2e-speed e2e-home e2e-usb e2e-power e2e-hotspot e2e-history e2e-wizard; do echo \"== $t\"; node tests/$t.mjs || exit 1; done"
+    "test": "for t in e2e e2e-inline e2e-live e2e-live2 e2e-speed e2e-home e2e-usb e2e-power e2e-hotspot e2e-history e2e-wizard e2e-battery e2e-finish; do echo \"== $t\"; node tests/$t.mjs || exit 1; done"
   },
   "devDependencies": { "playwright-core": "^1.49.0" }
 }

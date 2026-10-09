@@ -16,11 +16,29 @@ class H(SimpleHTTPRequestHandler):
     hist_since={"ts":NOW-5400,"reason":"new-day"}   # when the history was last emptied
     visit={"date":time.strftime("%Y-%m-%d"),"company":"Demo Coffee","location":"Main St","ts":NOW-3600}   # today's visit already done
     companies=[{"name":"Demo Coffee","locations":["Main St","Airport"]},{"name":"Example Tea","locations":["Harbor"]}]
+    reports=[{"name":"2026-10-01_0930_Example-Tea-Harbor.html","ts":NOW-7*86400,"size":9000,"site":"Example Tea Harbor"}]
     def log_message(self,*a): pass
     def hotspot(self):
         return {"mode":H.hs_mode,"service":True,"ssid":"JarvisPi-Manage","active":H.hs_mode=="on","clients":0,"online":True,"fallback_in":None,"error":"","note":""}
     def do_API(self,method):
         path=self.path.split("?")[0]
+        if path=="/api/visit/finish" and method=="POST":
+            site=(H.visit.get("company","") + (" - "+H.visit["location"] if H.visit.get("location") else "")) or "site"
+            import re as _re; slug=_re.sub(r"[^A-Za-z0-9._]+","-",site).strip("-.")
+            name=time.strftime("%Y-%m-%d_%H%M")+"_"+slug+".html"
+            H.reports=[{"name":name,"ts":int(time.time()),"size":12000,"site":slug.replace("-"," ")}]+[r for r in H.reports if r["name"]!=name]
+            H.visit=dict(H.visit,finished=True,report=name); H.hist_since={"ts":int(time.time()),"reason":"finished"}
+            return jr({"ok":True,"report":name,"site":site})
+        if path=="/api/reports": return jr({"reports":H.reports})
+        if path=="/api/reports/delete" and method=="POST":
+            try: n=json.loads(getattr(self,"body",b"") or b"{}").get("name")
+            except Exception: n=None
+            if not any(r["name"]==n for r in H.reports): return jr({"error":"no such report"},404)
+            H.reports=[r for r in H.reports if r["name"]!=n]; return jr({"ok":True,"reports":H.reports})
+        if path.startswith("/api/reports/"):
+            n=path[len("/api/reports/"):]
+            if not any(r["name"]==n for r in H.reports): return jr({"error":"no such report"},404)
+            return 200, ("<!doctype html><html><head><style>h1{color:rgb(200,0,0)} body{margin:24px}</style></head><body><h1>Site report</h1><p id=\"who\">"+n+"</p>"+"<p>line</p>"*80+"</body></html>").encode()
         if path=="/api/visit":
             if method=="POST":
                 try: b=json.loads(getattr(self,"body",b"") or b"{}")
@@ -32,7 +50,7 @@ class H(SimpleHTTPRequestHandler):
                     H.visit={"date":time.strftime("%Y-%m-%d"),"company":c,"location":l}
                     old=next((x for x in H.companies if x["name"]==c),{"locations":[]})
                     H.companies=[{"name":c,"locations":([l] if l else [])+[x for x in old["locations"] if x!=l]}]+[x for x in H.companies if x["name"]!=c]
-            v=H.visit; return jr({"ok":True,"needed":not v or v.get("date")!=time.strftime("%Y-%m-%d"),"visit":v,"companies":H.companies,"ssid":"Example WiFi","site_name":"Demo site"})
+            v=H.visit; return jr({"ok":True,"needed":not v or v.get("date")!=time.strftime("%Y-%m-%d") or bool(v.get("finished")),"visit":v,"companies":H.companies,"ssid":"Example WiFi","site_name":"Demo site"})
         if path=="/api/wifi/scan" and method=="POST":
             return jr({"networks":[{"ssid":"Example WiFi","signal":86,"security":"WPA2"},{"ssid":"Store Guest","signal":64,"security":"WPA2"},{"ssid":"Open Cafe","signal":40,"security":""}]})
         if path=="/api/hotspot":
@@ -46,7 +64,8 @@ class H(SimpleHTTPRequestHandler):
         if path=="/api/status":
             link="Connected to 02:00:5e:00:00:01 (on wlan1)\n\tSSID: Example WiFi\n\tfreq: 5745.0\n\tRX: 1234 bytes\n\tsignal: -52 dBm\n\trx bitrate: 866.7 MBit/s VHT-MCS 9 80MHz\n\ttx bitrate: 780.0 MBit/s\n"
             usb={"iface":"wlan1","mbps":5000,"label":"5 Gbps","gen":"USB 3","usb3_capable":True,"port_usb3":True,"status":"ok","hint":"","id":"0e8d:7961","product":"Wireless_Device","usb_path":"2-1"}
-            return jr({"link":link,"net":{"iface":"wlan1","type":"wifi","ip":"192.168.88.34","gw":"192.168.88.1","speed":"","duplex":""},"usb":usb,"active":"Example WiFi:wlan1"})
+            return jr({"link":link,"net":{"iface":"wlan1","type":"wifi","ip":"192.168.88.34","gw":"192.168.88.1","speed":"","duplex":""},"usb":usb,"active":"Example WiFi:wlan1",
+                       "battery":{"percent":87,"source":"mains","level":"mains","shutting_down":False,"critical":10}})
         if path=="/api/signal": return jr({"link":"Connected to x\n\tSSID: Example WiFi\n\tfreq: 5745.0\n\tsignal: -52 dBm\n\trx bitrate: 866.7 MBit/s"})
         if path=="/api/netmon/status":
             return jr({"running":True,"uptime_pct":99.82,"avg_ms":18.4,"gateway_pct":100,"samples":1440,"last":{"ts":NOW-30,"inet_ok":True,"inet_ms":17,"ssid":"Example WiFi","iface":"wlan1"},

@@ -1,0 +1,22 @@
+[Unit]
+Description=Jarvis Net Tools: Argon PWR UPS battery level + safe shutdown when it runs low
+After=local-fs.target
+
+[Service]
+Type=simple
+User=nettools
+Group=nettools
+# the UPS serial port is root:dialout 0660
+SupplementaryGroups=dialout
+ExecStart=/usr/local/bin/jarvis-ups
+Restart=always
+RestartSec=10
+RuntimeDirectory=jarvis-ups
+RuntimeDirectoryMode=0755
+# no NoNewPrivileges: the low-battery shutdown goes through the app user's existing sudo rule for `shutdown`
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -42,7 +42,8 @@ Also: a background **network monitor** (internet / gateway / DNS samples, outage
 **site report**, an optional **Cockpit** page, an optional **setup hotspot with a captive page** for joining Wi-Fi from a phone
 (on **Auto** it stays off while the Pi has a network and turns itself on after 2 minutes without one),
 a **setup wizard** on the first start of each day (company -> location -> Wi-Fi -> main page; companies and locations
-are remembered), a **one-day history** (kept through restarts and power-offs, emptied when a new day starts) so one report covers a visit,
+are remembered), **Finish Visit** (saves the site report on the Pi, clears the history; the next start shows the wizard again),
+a **one-day history** (kept through restarts and power-offs, emptied when a new day starts) so one report covers a visit,
 and a small **agent API** (hashed, scoped bearer tokens) so other automations can read the Pi's state.
 
 ## How it is built (the interesting parts)
@@ -81,7 +82,7 @@ fraction of it in practice.
 | Wi-Fi (tests) | **ALFA Network AWUS036AXML** - Wi-Fi 6E (802.11axe), AXE3000, 2.4 / 5 / 6 GHz, USB 3.0 | MediaTek MT7921AU (`mt7921u` driver, in the kernel). On Linux it uses up to 80 MHz channels, so the link tops out near 1.2 Gbit/s; must enumerate at USB 3 (5000 M) |
 | Wi-Fi (setup hotspot) | the Pi's built-in radio (Wi-Fi 5) | only on when needed (Settings > Setup Hotspot) |
 | Power at the desk | **5.1 V / 5 A USB-C PD** supply (Pi 5 type) | 27 W+ supplies that offer 5 V / 5 A; a 5 V / 3 A source makes the Pi throttle under load |
-| Power on the go | USB-C power bank (Anker) | works, but offers only 5 V / 3 A to the Pi; a Pi-5 UPS with a 5 V / 5 A output is the better fit |
+| Power on the go | **Argon PWR UPS, 10,000 mAh** (5 V / 5 A USB-C out) | full speed on battery; the app shows the battery % and shuts the Pi down safely when it runs low (`scripts/jarvis-ups`) |
 | Cables | short **USB-A to USB-C 10 Gbps** cable for the adapter; **5 A (e-marked) USB-C** cable for power | some USB-C cables reach USB 3 in one plug orientation only |
 
 Measured with this setup (business cable line, 5 GHz, Ookla): **775 / 340 Mbps** on the 5 A supply, **734 / 354 Mbps** on

@@ -139,7 +139,7 @@ function goto(page) {
   if (page === "network") renderSavedDevices();
   if (page === "tools") { iperfInfo(); toolHint(); }
   if (page === "monitor") { refreshNetmon(); spKick(); }
-  if (page === "settings") { loadSettings(); refreshHotspot(); }
+  if (page === "settings") { loadSettings(); refreshHotspot(); loadReports(); }
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => goto(b.dataset.page));
 document.addEventListener("click", (e) => {
@@ -267,6 +267,71 @@ $("wz-join-cancel").onclick = () => $("wz-join").classList.add("hidden");
 $("wz-rescan").onclick = () => wzWifi();
 $("wz-done").onclick = () => closeWizard();
 $("set-new-visit").onclick = () => openWizard();
+
+// ---------- Finish Visit: save the site report, clear the history, next start = setup wizard ----------
+const finishDlg = $("finish-dlg");
+let finishBusy = false, finishReport = "";
+finishDlg.addEventListener("cancel", (e) => { if (finishBusy) e.preventDefault(); });
+$("set-finish-visit").onclick = async () => {
+  if (!window.confirm("Finish this visit?\n\nThe site report is saved on the Pi, then the history is cleared.\nThe next start shows the setup wizard.")) return;
+  finishBusy = true; $("finish-btns").classList.add("hidden");
+  $("finish-title").textContent = "Finishing the visit…";
+  $("finish-msg").textContent = "Building and saving the site report (about 20-30 s). Keep the Pi on.";
+  finishDlg.showModal();
+  try {
+    const d = await api("/api/visit/finish", {});
+    if (!d.ok) throw new Error(d.error || "Could not finish the visit.");
+    finishReport = d.report;
+    $("finish-title").textContent = "✅ Visit finished";
+    $("finish-msg").textContent = "Report saved: " + d.site + "\nThe history is cleared. You can turn the Pi off now: the next start shows the setup wizard.";
+    $("finish-btns").classList.remove("hidden"); $("finish-view").classList.remove("hidden");
+    loadSettings(true); loadReports();
+  } catch (e) {
+    $("finish-title").textContent = "Couldn't finish";
+    $("finish-msg").textContent = e.message + "\nNothing was cleared.";
+    $("finish-btns").classList.remove("hidden"); $("finish-view").classList.add("hidden");
+  }
+  finishBusy = false;
+};
+$("finish-off").onclick = () => { finishDlg.close(); openPower(); $("power-off").click(); };
+$("finish-view").onclick = () => { if (finishReport) { finishDlg.close(); openReport(finishReport, "Site report"); } };
+$("finish-next").onclick = () => { finishDlg.close(); openWizard(); };
+
+// The report is the Pi's own HTML (inline styles only); a shadow root keeps its styles off the app, and the app's CSP
+// still applies (no scripts).
+const reportDlg = $("report-dlg");
+async function openReport(name, title) {
+  const url = "/api/reports/" + encodeURIComponent(name);
+  const r = await fetch(url, { cache: "no-store" });
+  if (r.status === 401) { showLogin(); return; }
+  if (!r.ok) { show("That report is gone."); loadReports(); return; }
+  const body = $("report-body"), root = body.shadowRoot || body.attachShadow({ mode: "open" });
+  root.innerHTML = await r.text();
+  $("report-title").textContent = title; $("report-dl").href = url + "?download=1"; $("report-dl").setAttribute("download", name);
+  reportDlg.showModal(); body.scrollTop = 0;
+}
+$("report-close").onclick = () => reportDlg.close();
+
+async function loadReports() {
+  const box = $("rep-list");
+  try {
+    const list = (await api("/api/reports")).reports || [];
+    box.innerHTML = list.length ? "" : "<div class='empty'>No saved reports yet.</div>";
+    list.forEach(r => {
+      const row = document.createElement("div"); row.className = "item";
+      row.innerHTML = "<div class='txt'><div class='n'>" + esc(r.site) + "</div><div class='s'>" + esc(fmtTs(r.ts)) + "</div></div>";
+      const open = document.createElement("button"); open.className = "tiny util"; open.textContent = "Open";
+      open.onclick = () => openReport(r.name, r.site + " · " + fmtTs(r.ts));
+      const del = document.createElement("button"); del.className = "tiny danger"; del.textContent = "Delete";
+      del.onclick = async () => {
+        if (!window.confirm("Delete the report " + r.site + " (" + fmtTs(r.ts) + ")?")) return;
+        try { await api("/api/reports/delete", { name: r.name }); } catch (e) {}
+        loadReports();
+      };
+      row.appendChild(open); row.appendChild(del); box.appendChild(row);
+    });
+  } catch (e) { box.textContent = e.message; }
+}
 $("login-btn").onclick = async () => {
   $("login-err").textContent = "";
   try {
@@ -286,6 +351,25 @@ function parseLink(link) {
     rate: (link.match(/rx bitrate:\s*([\d.]+ \S+)/) || [])[1] || "?", freq: (link.match(/freq:\s*([\d.]+)/) || [])[1] };
 }
 const bandOf = (f) => !f ? "" : f < 3000 ? "2.4 GHz" : f < 5925 ? "5 GHz" : "6 GHz";
+// header line under the page title: site + battery, visible on every page (the Battery row can be below the fold)
+let lastBattery = null;
+function renderSub() {
+  const parts = [];
+  if (settings.site_name) parts.push("📍 " + settings.site_name);
+  if (lastBattery) parts.push((lastBattery.source === "mains" ? "🔌 " : "🔋 ") + lastBattery.percent + "%");
+  $("hdr-site").textContent = parts.join("  ·  ");
+}
+// Argon UPS battery (only when one is connected): green on mains or with charge to spare, amber when low, red near
+// the automatic safe shutdown
+function batteryRow(b) {
+  const onMains = b.source === "mains", dot = b.shutting_down || (!onMains && b.level === "critical") ? "bad" : !onMains && b.level === "low" ? "warn" : "ok";
+  const what = b.shutting_down ? "shutting down safely" : onMains ? (b.percent >= 100 ? "plugged in, full" : "plugged in, charging") : "on battery";
+  let r = "<div class='row' id='home-battery'><span class='lbl'>Battery</span><span class='val'>" + esc(String(b.percent)) + "% <span class='muted'>· " +
+    esc(what) + "</span><i class='dot " + dot + "'></i></span></div>";
+  if (!onMains && !b.shutting_down && (b.level === "low" || b.level === "critical"))
+    r += "<div class='row note' id='home-battery-hint'><span class='small nm-warn'>⚠ Plug in soon: the Pi shuts down safely at " + esc(String(b.critical)) + "%.</span></div>";
+  return r;
+}
 // USB link of the Wi-Fi adapter: green at USB 3; amber + what to do when a USB 3 adapter fell back to USB 2 (480 Mbps)
 function usbRows(u) {
   const warn = u.status === "warn", dot = u.status === "ok" ? "ok" : warn ? "warn" : "";
@@ -316,6 +400,8 @@ async function refreshHome() {
       r += kv("Network", esc(p.ssid)) + kv("Band", bandOf(+p.freq) || "—") + kv("Signal", esc(p.sig) + " dBm") + kv("Link Rate", esc(p.rate));
     } else if (p.ssid) r += kv("WiFi radio", "on " + esc(p.ssid));
     if (st.usb) r += usbRows(st.usb);
+    if (st.battery) r += batteryRow(st.battery);
+    lastBattery = st.battery || null; renderSub();
     r += kv("IP Address", esc(net.ip || "N/A")) + kv("Default Gateway", esc(net.gw || "N/A"));
     r += kv("Internet", nm.last ? (inetOn ? "<span class='nm-ok'>online</span>" : "<span class='nm-bad'>OFFLINE</span>") + (nm.last.inet_ms ? " <span class='muted'>" + nm.last.inet_ms + " ms</span>" : "") : "<span class='muted'>unknown</span>");
     r += kv("Monitor", nm.running ? "<span class='nm-ok'>running</span>" : "<span class='nm-bad'>stopped</span>");
@@ -1094,7 +1180,7 @@ $("nm-7d").onclick = () => { nmHours = 168; nmSeg(); refreshNetmon(); };
 
 // ---------- settings ----------
 function applySettings() {
-  $("hdr-site").textContent = settings.site_name ? "📍 " + settings.site_name : "";
+  renderSub();
   $("set-site").value = settings.site_name || "";
   $("set-interval").value = String(settings.speed_interval_min ?? 60);
   $("about").innerHTML = "Jarvis Net Tools v" + esc(settings.version || "?") + " · Pi: " + esc(settings.hostname || "?") + "<br>Dashboard: Cockpit on port 9090 · Hotspot: JarvisPi-Manage";
@@ -1103,7 +1189,7 @@ function applySettings() {
   renderServiceChecks(); renderSavedDevices();
 }
 function renderHistorySince(h) {
-  const why = { "new-day": "new day", "power-on": "power-on", manual: "cleared by hand" };
+  const why = { "new-day": "new day", "power-on": "power-on", manual: "cleared by hand", finished: "visit finished" };
   $("hist-since").textContent = h && h.ts ? fmtTs(h.ts) + " · " + (why[h.reason] || "cleared") : "—";
 }
 $("btn-hist-clear").onclick = async () => {

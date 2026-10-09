@@ -1,0 +1,189 @@
+#!/usr/bin/python3 -I
+"""jarvis-ups - reads the Argon PWR UPS battery for Jarvis Net Tools and shuts the Pi down safely before it runs empty.
+
+Install as /usr/local/bin/jarvis-ups (owner root, mode 755); run by jarvis-ups.service as the app user (+ group dialout).
+Needs `dtoverlay=dwc2,dr_mode=host` on a Pi 5: the UPS talks over its USB-C cable (a USB CDC-ACM serial port named
+"Argon" / "Argon_USB"; the VID:PID 1d6b:0104 is the generic Linux gadget one, so it is matched by name).
+
+Protocol (from the clean-room notes of github.com/dc0sk/argon-utils, docs/protocol/FACTS.md): 115200 8N1,
+frame = FE | len | cmd | payload | checksum (sum of all preceding bytes & 0xFF); a read is FE 00 cmd (cmd+FE)&FF.
+  cmd 0 -> [percent, flag]   flag 0 = on mains, anything else = on battery
+  cmd 4 -> [firmware]
+This program ONLY sends those two reads. Never anything else: command 9 resets the battery meter and other numbers are
+unmapped or set the clock / a wake-up time.
+
+Every 10 s it writes /run/jarvis-ups/state.json for the app. On battery at or below CRITICAL % for 3 readings in a row
+(30 s), and not in the first 3 minutes after boot (no shutdown loop), it runs a clean `shutdown -h now`.
+"""
+import glob
+import json
+import os
+import select
+import subprocess
+import sys
+import termios
+import time
+
+STATE_DIR = "/run/jarvis-ups"
+LOW = 25            # % on battery: amber on the screen
+CRITICAL = 10       # % on battery: safe shutdown once confirmed
+CONFIRM = 3         # consecutive critical readings before shutting down
+BOOT_GRACE = 180    # s after boot during which no shutdown is started
+TICK = 10
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def find_port(sys_root="/sys/class/tty"):
+    """/dev/ttyACMn of the UPS, found by its USB string descriptors (never by number or VID:PID)."""
+    for tty in sorted(glob.glob(os.path.join(sys_root, "ttyACM*"))):
+        dev = os.path.realpath(os.path.join(tty, "device"))
+        for d in (os.path.dirname(dev), dev):           # the interface's parent is the USB device
+            try:
+                with open(os.path.join(d, "manufacturer")) as f:
+                    man = f.read().strip()
+                with open(os.path.join(d, "product")) as f:
+                    prod = f.read().strip()
+            except OSError:
+                continue
+            if man == "Argon" and prod.startswith("Argon"):
+                return "/dev/" + os.path.basename(tty)
+    return None
+
+
+def frames(buf):
+    """Complete, checksum-valid frames in buf -> list of (cmd, payload). Junk and broken frames are skipped."""
+    out, i = [], 0
+    while i + 4 <= len(buf):
+        if buf[i] != 0xFE:
+            i += 1
+            continue
+        n = buf[i + 1]
+        end = i + 4 + n                                  # FE len cmd payload[n] checksum
+        if n > 32:                                       # no real reply is that long: a stray FE, resync
+            i += 1
+            continue
+        if end > len(buf):
+            break
+        if sum(buf[i:end - 1]) & 0xFF == buf[end - 1]:
+            out.append((buf[i + 2], bytes(buf[i + 3:end - 1])))
+            i = end
+        else:
+            i += 1
+    return out
+
+
+def decode_battery(payload):
+    if len(payload) != 2:
+        return None
+    return {"percent": min(payload[0], 100), "source": "mains" if payload[1] == 0 else "battery"}
+
+
+class Port:
+    def __init__(self, path):
+        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        a = termios.tcgetattr(self.fd)
+        a[0] = a[1] = a[3] = 0
+        a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        a[4] = a[5] = termios.B115200
+        termios.tcsetattr(self.fd, termios.TCSANOW, a)
+        termios.tcflush(self.fd, termios.TCIOFLUSH)
+
+    def read(self, cmd, wait=1.5):
+        if cmd not in (0, 4):
+            raise ValueError("jarvis-ups only ever sends the battery and firmware reads")
+        os.write(self.fd, bytes([0xFE, 0x00, cmd, (cmd + 0xFE) & 0xFF]))
+        buf, end = b"", time.time() + wait
+        while time.time() < end:
+            r, _, _ = select.select([self.fd], [], [], 0.2)
+            if r:
+                buf += os.read(self.fd, 256)
+                got = [p for c, p in frames(buf) if c == cmd]
+                if got:
+                    return got[-1]
+        return None
+
+    def close(self):
+        os.close(self.fd)
+
+
+def level(reading):
+    if not reading:
+        return "unknown"
+    if reading["source"] == "mains":
+        return "mains"
+    return "critical" if reading["percent"] <= CRITICAL else "low" if reading["percent"] <= LOW else "battery"
+
+
+class Watch:
+    """Shutdown decision: critical on battery for CONFIRM readings in a row, after the boot grace period."""
+
+    def __init__(self):
+        self.streak = 0
+        self.done = False
+
+    def step(self, reading, uptime):
+        lvl = level(reading)
+        self.streak = self.streak + 1 if lvl == "critical" else 0
+        return lvl, (not self.done and self.streak >= CONFIRM and uptime >= BOOT_GRACE)
+
+
+def uptime():
+    with open("/proc/uptime") as f:
+        return float(f.read().split()[0])
+
+
+def write_state(st, state_dir=STATE_DIR):
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        tmp = os.path.join(state_dir, ".state.tmp")
+        with open(tmp, "w") as f:
+            json.dump(st, f)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, os.path.join(state_dir, "state.json"))
+    except OSError as e:
+        log(f"cannot write state: {e}")
+
+
+def main():
+    w, port, path, fw, last_lvl = Watch(), None, None, None, None
+    while True:
+        st = {"ts": int(time.time()), "present": False, "percent": None, "source": None, "level": "unknown",
+              "firmware": fw, "low": LOW, "critical": CRITICAL, "shutting_down": w.done}
+        try:
+            if port is None:
+                path = find_port()
+                if path:
+                    port = Port(path)
+                    f = port.read(4)
+                    fw = f[0] if f else None
+                    log(f"UPS found on {path} (firmware {fw})")
+            if port is not None:
+                r = decode_battery(port.read(0) or b"")
+                if r is None:
+                    raise OSError("no answer")
+                lvl, go = w.step(r, uptime())
+                st.update(present=True, firmware=fw, level=lvl, **r)
+                if lvl != last_lvl:
+                    log(f"battery {r['percent']}% - {lvl}")
+                    last_lvl = lvl
+                if go:
+                    w.done = True
+                    st["shutting_down"] = True
+                    write_state(st)
+                    log(f"battery critical ({r['percent']}% on battery, {CONFIRM} readings): clean shutdown")
+                    subprocess.run(["sudo", "-n", "shutdown", "-h", "now"], timeout=30)
+        except OSError as e:
+            if port is not None:
+                log(f"UPS lost ({e}); looking for it again")
+                port.close()
+            port, last_lvl = None, None
+            w.streak = 0
+        write_state(st)
+        time.sleep(TICK)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

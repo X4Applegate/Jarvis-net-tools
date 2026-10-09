@@ -24,7 +24,7 @@ fi
 echo "== packages"
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
   labwc chromium swayidle wlopm squeekboard wlr-randr grim wtype wayland-utils dbus-user-session curl \
-  fonts-dejavu-core libglib2.0-bin gsettings-desktop-schemas dconf-gsettings-backend librsvg2-common >/dev/null
+  fonts-dejavu-core fonts-noto-color-emoji libglib2.0-bin gsettings-desktop-schemas dconf-gsettings-backend librsvg2-common >/dev/null
 
 echo "== kiosk user + autologin on the screen (tty1 only)"
 id "$KUSER" >/dev/null 2>&1 || useradd -m -s /bin/bash -c "Jarvis touch-screen kiosk" "$KUSER"

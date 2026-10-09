@@ -152,7 +152,8 @@ class Auth(unittest.TestCase):
         for method, path in [("get", "/api/status"), ("post", "/api/ping/stream"), ("post", "/api/trace/stream"), ("post", "/api/portscan/stream"),
                              ("post", "/api/speedtest/stream"), ("post", "/api/wifi/join"), ("post", "/api/shutdown"), ("get", "/api/devices.csv"),
                              ("get", "/api/hotspot"), ("post", "/api/hotspot"), ("post", "/api/history/clear"),
-                             ("get", "/api/visit"), ("post", "/api/visit")]:
+                             ("get", "/api/visit"), ("post", "/api/visit"), ("post", "/api/visit/finish"), ("get", "/api/reports"),
+                             ("get", "/api/reports/2026-10-09_1200_x.html"), ("post", "/api/reports/delete")]:
             r = getattr(c, method)(path, json={}, environ_base=remote("198.51.100.9")) if method == "post" else c.get(path, environ_base=remote("198.51.100.9"))
             self.assertEqual(r.status_code, 401, path)
 

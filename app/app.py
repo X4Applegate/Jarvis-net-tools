@@ -360,10 +360,29 @@ def _usb_link(iface, sys_root):
             "usb_path": os.path.basename(dev)}
 
 
+UPS_STATE_PATH = "/run/jarvis-ups/state.json"
+
+
+def ups_battery():
+    """The Argon PWR UPS as jarvis-ups last read it (every 10 s), or None when there is no UPS / no fresh reading."""
+    try:
+        with open(UPS_STATE_PATH) as f:
+            st = json.load(f)
+        if not isinstance(st, dict) or not st.get("present") or time.time() - float(st.get("ts", 0)) > 60:
+            return None
+        pct = int(st["percent"])
+        return {"percent": max(0, min(100, pct)), "source": "battery" if st.get("source") == "battery" else "mains",
+                "level": str(st.get("level", ""))[:10], "shutting_down": bool(st.get("shutting_down")),
+                "critical": int(st.get("critical", 10))}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 @app.get("/api/status")
 @require_login
 def status():
     return jsonify({"link": run(["/usr/sbin/iw", "dev", WLAN, "link"]), "net": net_info(), "usb": usb_link(),
+                    "battery": ups_battery(),
                     "active": run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])})
 
 
@@ -1903,7 +1922,7 @@ def load_visit():
 def visit_state():
     v, c = load_visit(), load_cfg()
     companies = [x for x in c.get("companies", []) if isinstance(x, dict) and x.get("name")]
-    return {"needed": not v or v.get("date") != today(), "visit": v, "companies": companies,
+    return {"needed": not v or v.get("date") != today() or bool(v.get("finished")), "visit": v, "companies": companies,
             "ssid": active_ssid() or "", "site_name": c.get("site_name", "")}
 
 
@@ -2259,6 +2278,86 @@ def agent_set_ap():
     return jsonify({"ok": ok, "message": msg[:200], "ssid": ssid,
                     "now_on": {"bssid": cur, "ap_name": load_ap_names().get(cur, ""), "band_ghz": current_band()},
                     "pinned": pinned and ok, "reverts_to_auto_at": time.strftime("%H:%M:%S", time.localtime(until)) if until else None})
+
+
+# ---- finish visit + saved reports -----------------------------------------
+# Finish Visit = save the site report on the Pi, empty the history, mark the visit done: the next start shows the
+# setup wizard. Saved reports stay until deleted (Settings > Saved Reports); the history they were made from does not.
+REPORTS_DIR = "/var/lib/jarvis-nettools/reports"
+REPORT_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{4}(-\d+)?_[A-Za-z0-9._-]{1,60}\.html$")
+REPORTS_KEEP = 200
+
+
+def report_list():
+    try:
+        names = [n for n in os.listdir(REPORTS_DIR) if REPORT_NAME.match(n)]
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        st = os.stat(os.path.join(REPORTS_DIR, n))
+        out.append({"name": n, "ts": int(st.st_mtime), "size": st.st_size, "site": n[16:-5].split("_", 1)[-1].replace("-", " ")})
+    return sorted(out, key=lambda r: r["name"], reverse=True)
+
+
+@app.post("/api/visit/finish")
+@require_login
+def visit_finish():
+    c = load_cfg()
+    site = c.get("site_name") or active_ssid() or "site"
+    html = report_html(gather_report(site))
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    base = time.strftime("%Y-%m-%d_%H%M")
+    slug = re.sub(r"[^A-Za-z0-9._]+", "-", site).strip("-.")[:60] or "site"     # "Demo Coffee - Main St" -> Demo-Coffee-Main-St
+    name, n = f"{base}_{slug}.html", 1
+    while os.path.exists(os.path.join(REPORTS_DIR, name)):        # two finishes in the same minute
+        n += 1
+        name = f"{base}-{n}_{slug}.html"
+    tmp = os.path.join(REPORTS_DIR, ".report.tmp")
+    with open(tmp, "w") as f:
+        f.write(html)
+    os.chmod(tmp, 0o640)
+    os.replace(tmp, os.path.join(REPORTS_DIR, name))
+    for old in report_list()[REPORTS_KEEP:]:
+        os.remove(os.path.join(REPORTS_DIR, old["name"]))
+    clear_history("finished")
+    run(["sudo", "/usr/local/bin/wifi-clear"], timeout=40)      # visited sites' Wi-Fi; keeps own networks + the one in use
+    v = load_visit() or {"date": today(), "company": "", "location": ""}
+    v.update(finished=True, finished_ts=int(time.time()), report=name)
+    tmp = VISIT_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(v, f)
+    os.replace(tmp, VISIT_PATH)
+    return jsonify({"ok": True, "report": name, "site": site})
+
+
+@app.get("/api/reports")
+@require_login
+def reports_get():
+    return jsonify({"reports": report_list()})
+
+
+@app.get("/api/reports/<name>")
+@require_login
+def report_file(name):
+    if not REPORT_NAME.match(name) or not os.path.exists(os.path.join(REPORTS_DIR, name)):
+        return jsonify({"error": "no such report"}), 404
+    r = send_from_directory(REPORTS_DIR, name, mimetype="text/html", as_attachment=bool(request.args.get("download")))
+    r.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+    return r
+
+
+@app.post("/api/reports/delete")
+@require_login
+def report_delete():
+    name = str((request.get_json(silent=True) or {}).get("name", "")) if isinstance(request.get_json(silent=True), dict) else ""
+    if not REPORT_NAME.match(name):
+        return jsonify({"error": "no such report"}), 404
+    try:
+        os.remove(os.path.join(REPORTS_DIR, name))
+    except FileNotFoundError:
+        return jsonify({"error": "no such report"}), 404
+    return jsonify({"ok": True, "reports": report_list()})
 
 
 @app.get("/api/report")
