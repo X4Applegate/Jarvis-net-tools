@@ -111,8 +111,8 @@ const ICON = (id) => '<svg viewBox="0 0 24 24"><use href="#i-' + id + '"/></svg>
 const PAGE_META = {
   home: { title: "Info", actions: () => [{ icon: "refresh", label: "Refresh", fn: () => refreshHome() }, { icon: "power", label: "Power", fn: () => openPower() },
     { icon: "lock", label: "Lock", fn: () => $("logout-btn").click() }] },
-  wifi: { title: "Signal", actions: () => [{ text: "Scan", fn: () => $("wifi-scan-btn").click() }] },
-  network: { title: "LAN", actions: () => [{ text: "Scan", fn: () => $("btn-devices2").click() }] },
+  wifi: { title: "Signal", actions: () => [scanning ? { text: "Scanning…", label: "Scanning", busy: true, fn: () => {} } : { text: "Scan", fn: () => $("wifi-scan-btn").click() }] },
+  network: { title: "LAN", actions: () => [lanScanning ? { text: "Scanning…", label: "Scanning", busy: true, fn: () => {} } : { text: "Scan", fn: () => $("btn-devices2").click() }] },
   tools: { title: "Tools", actions: () => [{ text: liveOn ? "Stop" : "Start", fn: () => startTool() }] },
   monitor: { title: "Speed", actions: () => [{ text: speedOn ? "Stop" : "Test", fn: () => startSpeed() }] },
   settings: { title: "Settings", actions: () => [] },
@@ -124,6 +124,7 @@ function renderHeader() {
   m.actions().forEach(a => {
     const b = document.createElement("button"); b.setAttribute("aria-label", a.label || a.text);
     if (a.icon) b.innerHTML = ICON(a.icon); else { b.textContent = a.text; b.className = "txt"; }
+    if (a.busy) { b.disabled = true; b.innerHTML = "<span class='spin'></span>" + esc(a.text); }
     b.onclick = a.fn; box.appendChild(b);
   });
 }
@@ -136,10 +137,10 @@ function goto(page) {
   window.scrollTo(0, 0);
   if (page === "home") { HG.dispF = 0; HG.num = 0; refreshHome(); }   // replay the sweep on every visit
   if (page === "wifi") { refreshStatus(); loadSaved(); autoScan(); drawSignalGraph(); }
-  if (page === "network") renderSavedDevices();
+  if (page === "network") { renderSavedDevices(); lanShowLast(); }
   if (page === "tools") { iperfInfo(); toolHint(); }
   if (page === "monitor") { refreshNetmon(); spKick(); }
-  if (page === "settings") { loadSettings(); refreshHotspot(); loadReports(); }
+  if (page === "settings") { loadSettings(); refreshHotspot(); loadReports(); loadMail(); }
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => goto(b.dataset.page));
 document.addEventListener("click", (e) => {
@@ -296,21 +297,104 @@ $("set-finish-visit").onclick = async () => {
 $("finish-off").onclick = () => { finishDlg.close(); openPower(); $("power-off").click(); };
 $("finish-view").onclick = () => { if (finishReport) { finishDlg.close(); openReport(finishReport, "Site report"); } };
 $("finish-next").onclick = () => { finishDlg.close(); openWizard(); };
+$("finish-share").onclick = () => { if (finishReport) { finishDlg.close(); openShare(finishReport, "Site report"); } };
 
 // The report is the Pi's own HTML (inline styles only); a shadow root keeps its styles off the app, and the app's CSP
 // still applies (no scripts).
 const reportDlg = $("report-dlg");
+let reportName = "";
 async function openReport(name, title) {
   const url = "/api/reports/" + encodeURIComponent(name);
   const r = await fetch(url, { cache: "no-store" });
   if (r.status === 401) { showLogin(); return; }
   if (!r.ok) { show("That report is gone."); loadReports(); return; }
   const body = $("report-body"), root = body.shadowRoot || body.attachShadow({ mode: "open" });
-  root.innerHTML = await r.text();
-  $("report-title").textContent = title; $("report-dl").href = url + "?download=1"; $("report-dl").setAttribute("download", name);
+  // In a shadow root there is no <html>/<body>, so the report's own body{...} rule (dark text on white) would match
+  // nothing and the app's light text colour would show through: re-aim html/body rules at a wrapper div.
+  const doc = new DOMParser().parseFromString(await r.text(), "text/html");
+  const css = [...doc.querySelectorAll("style")].map(s => s.textContent).join("\n").replace(/(^|[},\s])(html|body)(?=\s*[{,])/g, "$1.rep-doc");
+  root.innerHTML = "<style>:host{display:block;color:#111;background:#fff} .rep-doc{color:#111;background:#fff;margin:16px;" +
+    "font:15px -apple-system,'Segoe UI',Roboto,sans-serif}</style><style>" + css + "</style><div class='rep-doc'>" + doc.body.innerHTML + "</div>";
+  $("report-title").textContent = title; reportName = name;
   reportDlg.showModal(); body.scrollTop = 0;
 }
 $("report-close").onclick = () => reportDlg.close();
+$("report-share").onclick = () => { reportDlg.close(); openShare(reportName, $("report-title").textContent); };
+
+// ---------- Share a saved report: USB stick / email / download ----------
+// Each option says whether it can be used right now; a USB stick plugged in while the dialog is open is picked up.
+const shareDlg = $("share-dlg");
+const onPi = ["127.0.0.1", "localhost"].includes(location.hostname);     // the touch screen: downloading makes no sense
+let share = { name: "", dev: "", timer: null, busy: false };
+function usbLabel(d) { return (d.label || d.model || d.dev) + " (" + (d.size / 1e9).toFixed(d.size >= 1e10 ? 0 : 1) + " GB, " + (d.fstype === "vfat" ? "FAT32" : "exFAT") + ")"; }
+async function shareUsbCheck() {
+  clearTimeout(share.timer);
+  if (!shareDlg.open || share.busy) return;
+  try {
+    const drives = (await api("/api/usb")).drives || [];
+    share.dev = drives.length ? drives[0].dev : "";
+    $("share-usb").classList.toggle("off", !share.dev); $("share-usb-go").disabled = !share.dev;
+    $("share-usb-st").textContent = share.dev ? "Ready: " + usbLabel(drives[0]) : "Plug in a USB stick (FAT32 or exFAT). It shows up here by itself.";
+  } catch (e) { $("share-usb-st").textContent = e.message; }
+  if (!share.dev) share.timer = setTimeout(shareUsbCheck, 3000);
+}
+async function openShare(name, title) {
+  share.name = name; share.busy = false;
+  $("share-what").textContent = title || name;
+  $("share-usb-st").textContent = "Looking for a USB stick…"; $("share-usb-go").disabled = true;
+  $("share-mail-st").textContent = ""; $("share-dl").classList.toggle("hidden", onPi);
+  $("share-dl-html").href = "/api/reports/" + encodeURIComponent(name) + "?download=1";
+  $("share-dl-pdf").href = "/api/reports/" + encodeURIComponent(name.replace(/\.html$/, ".pdf"));
+  shareDlg.showModal(); shareUsbCheck();
+  try {
+    const m = await api("/api/mail");
+    $("share-mail").classList.toggle("off", !m.ready); $("share-mail-go").disabled = !m.ready; $("share-mail-to").disabled = !m.ready;
+    $("share-mail-to").value = (m.to || []).join(", ");
+    $("share-mail-st").textContent = m.ready ? "" : "Set up email first: Settings > Email Reports.";
+  } catch (e) { $("share-mail-st").textContent = e.message; }
+}
+$("share-close").onclick = () => { clearTimeout(share.timer); shareDlg.close(); };
+shareDlg.addEventListener("close", () => clearTimeout(share.timer));
+$("share-usb-go").onclick = async () => {
+  share.busy = true; $("share-usb-go").disabled = true; $("share-usb-st").textContent = "Saving the report (PDF + HTML)… don't unplug yet.";
+  try {
+    const d = await api("/api/reports/usb", { name: share.name, dev: share.dev });
+    $("share-usb-st").textContent = d.ok ? "✅ Saved to " + (d.label || d.model || "the USB stick") + " in the " + d.folder + " folder.\nSafe to unplug now."
+                                         : "❌ " + (d.error || "Could not save.");
+  } catch (e) { $("share-usb-st").textContent = e.message; }
+  share.busy = false; $("share-usb-go").disabled = !share.dev;
+};
+$("share-mail-go").onclick = async () => {
+  $("share-mail-go").disabled = true; $("share-mail-st").textContent = "Making the PDF and sending…";
+  try {
+    const d = await api("/api/reports/email", { name: share.name, to: $("share-mail-to").value });
+    $("share-mail-st").textContent = d.ok ? "✅ Sent to " + d.to.join(", ") + "." : "❌ " + (d.error || "Could not send.");
+  } catch (e) { $("share-mail-st").textContent = e.message; }
+  $("share-mail-go").disabled = false;
+};
+
+// ---------- Settings > Email Reports ----------
+async function loadMail() {
+  try {
+    const m = await api("/api/mail");
+    $("mail-host").value = m.host; $("mail-sec").value = m.security; $("mail-port").value = m.port;
+    $("mail-user").value = m.user; $("mail-from").value = m.from; $("mail-to").value = (m.to || []).join(", ");
+    $("mail-pass").value = ""; $("mail-pass").placeholder = m.password_set ? "Password (saved - leave empty to keep it)" : "Password";
+    $("mail-state").textContent = m.ready ? "ready" : "not set up";
+  } catch (e) {}
+}
+$("mail-sec").onchange = () => { $("mail-port").value = $("mail-sec").value === "ssl" ? 465 : 587; };
+$("mail-save").onclick = async () => {
+  const body = { host: $("mail-host").value.trim(), security: $("mail-sec").value, port: $("mail-port").value, user: $("mail-user").value.trim(),
+    password: $("mail-pass").value, from: $("mail-from").value.trim(), to: $("mail-to").value };
+  try { const d = await api("/api/mail", body); show(d.ok ? "✅ Email settings saved." : "❌ " + (d.error || "Could not save.")); if (d.ok) loadMail(); }
+  catch (e) { show(e.message); }
+};
+$("mail-test").onclick = async () => {
+  show("Sending a test email…");
+  try { const d = await api("/api/mail/test", {}); show(d.ok ? "✅ Test email sent to " + d.to.join(", ") + "." : "❌ " + (d.error || "Could not send.")); }
+  catch (e) { show(e.message); }
+};
 
 async function loadReports() {
   const box = $("rep-list");
@@ -322,13 +406,15 @@ async function loadReports() {
       row.innerHTML = "<div class='txt'><div class='n'>" + esc(r.site) + "</div><div class='s'>" + esc(fmtTs(r.ts)) + "</div></div>";
       const open = document.createElement("button"); open.className = "tiny util"; open.textContent = "Open";
       open.onclick = () => openReport(r.name, r.site + " · " + fmtTs(r.ts));
+      const sh = document.createElement("button"); sh.className = "tiny util"; sh.textContent = "Share";
+      sh.onclick = () => openShare(r.name, r.site + " · " + fmtTs(r.ts));
       const del = document.createElement("button"); del.className = "tiny danger"; del.textContent = "Delete";
       del.onclick = async () => {
         if (!window.confirm("Delete the report " + r.site + " (" + fmtTs(r.ts) + ")?")) return;
         try { await api("/api/reports/delete", { name: r.name }); } catch (e) {}
         loadReports();
       };
-      row.appendChild(open); row.appendChild(del); box.appendChild(row);
+      row.appendChild(open); row.appendChild(sh); row.appendChild(del); box.appendChild(row);
     });
   } catch (e) { box.textContent = e.message; }
 }
@@ -435,40 +521,105 @@ document.addEventListener("visibilitychange", liveTick);
 $("btn-speed").onclick = () => { goto("monitor"); startSpeed(); }; $("btn-speed2").onclick = () => startSpeed();
 const pingGw = () => livePing("@gateway", 10, { title: "Ping Gateway", fallback: () => tool("Ping Gateway", "/api/pinggw") });
 $("btn-pinggw").onclick = pingGw; $("btn-pinggw2").onclick = pingGw;
-$("btn-ports").onclick = () => tool("Open Ports", "/api/ports");
-$("btn-bw").onclick = () => tool("Bandwidth (5s sample)", "/api/bandwidth");
+$("btn-ports").onclick = () => tvOpen("Open Ports (this Pi)", portsLoad);
+$("btn-bw").onclick = () => { Object.assign(bw, { prev: null, hist: {}, peak: {}, total: {}, sel: null }); tvOpen("Bandwidth Now", bwLoad, 1000); };
 $("btn-mtr").onclick = () => liveTrace("8.8.8.8", { title: "Path to Internet", fallback: () => tool("Path to Internet", "/api/mtr", {}) });
-$("btn-pubip").onclick = () => tool("Public IP & ISP", "/api/pubip");
-$("btn-dnscheck").onclick = () => tool("DNS Check", "/api/dnscheck");
-$("btn-dhcp").onclick = () => tool("Rogue DHCP check (~10s)", "/api/dhcp");
-$("btn-jack").onclick = () => tool("Ethernet jack test (~10s)", "/api/jack");
-const services = () => tool("Service / POS check", "/api/services");
-$("btn-services").onclick = services; $("btn-services2").onclick = services;
-const history = async () => { busy("Loading history"); try { const d = await api("/api/history"); show(d.output); } catch (e) { show(e.message); } busy(""); };
+$("btn-pubip").onclick = () => tvOpen("Public IP & ISP", pubipLoad);
+$("btn-dnscheck").onclick = () => tvOpen("DNS Check", dnsCheckLoad);
+$("btn-dhcp").onclick = () => tvOpen("Rogue DHCP Check", dhcpLoad);
+$("btn-jack").onclick = () => tvOpen("Ethernet Jack Test", jackLoad);
+$("btn-services").onclick = () => services(); $("btn-services2").onclick = () => services();
+const history = () => { hist.q = ""; hist.f = "All"; tvOpen("History", histLoad); };
 $("btn-history").onclick = history; $("btn-history2").onclick = history;
 
-// ---------- devices ----------
-let lastHosts = [];
+// ---------- LAN: device list with badges (like a network analyzer app); tap a device for its details page ----------
+let lastHosts = [], lanMeta = {}, lanScanning = false;
+const savedName = (h) => { const s = (settings.saved_devices || []).find(x => h.mac && x.mac.toUpperCase() === h.mac.toUpperCase()); return s ? s.name : ""; };
+const devTitle = (h) => savedName(h) || h.name || (h.upnp && h.upnp.friendly) || "";
+const ipHtml = (ip) => { const i = ip.lastIndexOf("."); return esc(ip.slice(0, i + 1)) + "<b>" + esc(ip.slice(i + 1)) + "</b>"; };
+const BADGE_CLS = { G: "G", W: "W", U: "U", B: "B", 6: "v6", P: "P", S: "S" };
+const badges = (h) => (h.flags || []).map(f => "<i class='bd " + BADGE_CLS[f] + "' title='" + esc(f) + "'>" + esc(f) + "</i>").join("");
 function renderDevList(hosts) {
-  const box = $("dev-list"); box.innerHTML = "";
-  hosts.forEach(h => {
-    const row = document.createElement("div"); row.className = "item";
-    row.innerHTML = "<div class='txt'><div class='n'>" + esc(h.name || h.type || h.vendor || h.ip) + " <span class='muted small'>" + esc(h.ip) + "</span></div><div class='s'>" + esc([h.type, h.vendor, h.mac].filter(Boolean).join(" · ")) + "</div></div>";
-    const b = document.createElement("button"); b.className = "tiny util"; b.textContent = "＋ save";
-    b.onclick = () => addSavedDevice(h.name || h.type || h.vendor || h.ip, h.mac, h.ip);
-    row.appendChild(b); box.appendChild(row);
+  const box = $("dev-list"), q = $("lan-search").value.trim().toLowerCase();
+  const shown = hosts.filter(h => !q || [devTitle(h), h.ip, h.vendor, h.mac, h.type].join(" ").toLowerCase().includes(q));
+  $("lan-net").textContent = (lanMeta.network || "This network") + " (" + hosts.length + ")";
+  $("lan-when").textContent = lanMeta.ts ? "scanned " + new Date(lanMeta.ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+  box.innerHTML = "";
+  if (!hosts.length && !lanScanning) box.innerHTML = "<div class='tv-empty'>No scan yet. Tap <b>Scan</b> to find every device on this network.</div>";
+  else if (!shown.length && q) box.innerHTML = "<div class='tv-empty'>Nothing matches “" + esc(q) + "”.</div>";
+  shown.forEach(h => {
+    const b = document.createElement("button"); b.className = "dev-row"; b.dataset.ip = h.ip;
+    const t = devTitle(h);
+    b.innerHTML = "<div class='dr-l'><div class='dr-name" + (t ? "" : " none") + "'>" + esc(t || "(no name)") + "</div><div class='dr-ip'>" + ipHtml(h.ip) + "</div><div class='dr-ven'>" +
+      esc([h.vendor, h.type].filter(Boolean).join(" · ") || "unknown vendor") + "</div></div><div class='dr-r'><div class='dr-ms'>" + (h.ping != null ? esc(String(h.ping)) + " ms" : "—") +
+      "</div><div class='badges'>" + badges(h) + "</div></div><span class='chev'>›</span>";
+    b.onclick = () => openDevice(h.ip);
+    box.appendChild(b);
   });
+  $("lan-legend").classList.toggle("hidden", !hosts.length);
+}
+$("lan-search").addEventListener("input", () => renderDevList(lastHosts));
+async function lanShowLast() {
+  if (lastHosts.length || lanScanning) { renderDevList(lastHosts); return; }
+  try { const d = await api("/api/devices/last"); lastHosts = d.hosts || []; lanMeta = d; } catch (e) {}
+  renderDevList(lastHosts);
 }
 async function findDevices() {
-  busy("Find & identify devices (~30s)");
+  if (lanScanning) return;                               // one scan at a time
+  lanScanning = true; $("lan-scanning").classList.remove("hidden"); $("btn-devices2").disabled = true; if (curPage === "network") renderHeader();
+  renderDevList(lastHosts);
   try {
     const d = await api("/api/devices", {});
-    lastHosts = d.hosts || [];
-    show(lastHosts.length ? "Devices (" + lastHosts.length + "):\n\n" + lastHosts.map(h => h.ip.padEnd(16) + (h.name || "—").slice(0, 24).padEnd(26) + (h.type || "").slice(0, 26).padEnd(28) + h.vendor.slice(0, 26) + "\n" + " ".repeat(16) + h.mac + (h.info ? "  · " + h.info : "")).join("\n") + "\n\n(list also shown on the Network page — tap ＋ save to bookmark one)" : "none found");
-    renderDevList(lastHosts);
-  } catch (e) { show(e.message); }
-  busy("");
+    lastHosts = d.hosts || []; lanMeta = d;
+  } catch (e) { $("lan-scanning").querySelector("b").textContent = "Scan failed: " + e.message; }
+  lanScanning = false; $("lan-scanning").classList.add("hidden"); $("btn-devices2").disabled = false; if (curPage === "network") renderHeader();
+  renderDevList(lastHosts);
 }
+
+// device details: what the scan found, every name source, and actions (Tools with this IP, Wake on LAN, web page, save)
+function ddRow(k, v, ok) {
+  const na = v == null || v === "" || (Array.isArray(v) && !v.length);
+  return "<div class='dd-row'><span class='k'>" + esc(k) + "</span><span class='v" + (na ? " na" : "") + "'>" + (na ? "N/A" : v) + "</span><i class='dot " + (na ? "" : ok === false ? "bad" : "ok") + "'></i></div>";
+}
+function ddAction(id, label, value) { return "<button class='dd-row' id='" + id + "'><span class='k'>" + esc(label) + "</span><span class='v na'>" + (value || "") + "</span><span class='chev'>›</span></button>"; }
+function goTool(tool, ip) {
+  tvClose(); goto("tools"); $("target").value = ip;
+  const b = document.querySelector("#tool-seg button[data-tool='" + tool + "']"); if (b) b.click();
+  startTool();
+}
+function openDevice(ip) {
+  tvOpen("Details", async () => {
+    const h = lastHosts.find(x => x.ip === ip); if (!h) throw new Error("that device is not in the last scan");
+    $("tv-title").textContent = devTitle(h) || h.ip;
+    const n = h.names || {}, u = h.upnp || {};
+    $("tv-body").innerHTML =
+      "<div class='dd-sect'>Actions</div>" +
+      ddAction("dd-ping", "Ping", "live") + ddAction("dd-trace", "Route (traceroute)", "") + ddAction("dd-ports", "Scan ports", "top 100") +
+      (h.mac ? ddAction("dd-wol", "Wake on LAN", esc(h.mac)) : "") +
+      (h.web ? "<a class='dd-row' id='dd-web' href='" + esc(h.web) + "' target='_blank' rel='noopener'><span class='k'>Web interface</span><span class='v'>" + esc(h.web) + "</span><span class='chev'>›</span></a>" : ddRow("Web interface", "")) +
+      ddAction("dd-save", savedName(h) ? "Rename saved device" : "Save / name this device", esc(savedName(h))) +
+      "<div id='dd-msg' class='dd-msg'></div>" +
+      "<div class='dd-sect'>Device</div>" +
+      ddRow("IP Address", esc(h.ip)) + ddRow("IPv6 Addresses", (h.ipv6 || []).map(esc).join("<br>")) + ddRow("MAC", esc(h.mac || "")) + ddRow("Vendor", esc(h.vendor || "")) +
+      ddRow("Type", esc(h.type || "")) + ddRow("Pingable", h.ping != null ? "Yes · " + esc(String(h.ping)) + " ms" : "No reply (many devices ignore ping)", h.ping != null) +
+      ddRow("Open ports", (h.ports || []).map(p => "<span class='port-chip'>" + esc(p) + "</span>").join("")) +
+      "<div class='dd-sect'>Device Names</div>" +
+      ddRow("Saved name", esc(savedName(h))) + ddRow("mDNS Name", esc(n.mdns || "")) + ddRow("NetBIOS Name", esc(n.netbios || "")) + ddRow("DNS Name", esc(n.dns || "")) +
+      ddRow("UPnP Name", esc(u.friendly || "")) + ddRow("UPnP Model", esc([u.manufacturer, u.model].filter(Boolean).join(" "))) + ddRow("Web page title", esc(h.title || "")) +
+      ddRow("Bonjour services", esc((h.services || []).join(", ")));
+    $("dd-ping").onclick = () => goTool("ping", h.ip);
+    $("dd-trace").onclick = () => goTool("trace", h.ip);
+    $("dd-ports").onclick = () => goTool("ports", h.ip);
+    if ($("dd-wol")) $("dd-wol").onclick = async () => {
+      $("dd-msg").textContent = "Sending the wake-up packet…";
+      try { const d = await api("/api/wol", { mac: h.mac }); $("dd-msg").textContent = d.error ? "❌ " + d.error : "✅ Wake-up packet sent to " + h.mac + ". It can take a minute to start."; }
+      catch (e) { $("dd-msg").textContent = e.message; }
+    };
+    $("dd-save").onclick = async () => { await addSavedDevice(devTitle(h) || h.vendor || h.ip, h.mac, h.ip); renderDevList(lastHosts); tvRun(); };
+  }, 0);
+  $("tv-refresh").classList.add("hidden");
+}
+$("tv").addEventListener("close", () => $("tv-refresh").classList.remove("hidden"));
 $("btn-devices").onclick = () => { goto("network"); findDevices(); };
 $("btn-devices2").onclick = findDevices;
 
@@ -553,11 +704,10 @@ const clearVisited = async () => {
 $("wifi-clear-btn").onclick = clearVisited; $("wifi-clear-btn2").onclick = clearVisited;
 let lastNets = [];
 const wantBand = () => $("wifi-band").value;
-function renderScan(quiet) {
+// a scan only feeds the channel graph and the Join dropdown (no text survey: the graph says the same, more clearly)
+function renderScan() {
   const sel = $("wifi-list"), b = wantBand();
   const nets = lastNets.filter(n => b === "auto" || n.band === b);
-  const label = b === "auto" ? "every network in range" : b + " GHz networks only";
-  if (!quiet) show(nets.length ? "Survey - " + label + ":\n\n" + nets.map(n => (n.band + "G").padEnd(5) + "ch " + String(n.ch).padEnd(4) + "  " + (n.sig + "%").padEnd(6) + n.ssid).join("\n") + "\n\n(named networks added to the dropdown - pick one and Join)" : "No " + (b === "auto" ? "" : b + " GHz ") + "networks seen.");
   const seen = new Set(); sel.innerHTML = ""; netInfo = {};
   nets.forEach(n => { netInfo[n.ssid] = n; if (!n.ssid || n.ssid === "(hidden)" || seen.has(n.ssid)) return; seen.add(n.ssid);
     const o = document.createElement("option"); o.value = n.ssid; o.textContent = n.ssid + "  (" + n.sig + "%, " + n.band + "G ch " + n.ch + ")"; sel.appendChild(o); });
@@ -566,13 +716,13 @@ function renderScan(quiet) {
   loadAps(false); drawSignalGraph();
 }
 // entering the WiFi page scans on its own (reuses a scan younger than 20 s instead of rescanning)
-let lastScanTs = 0, scanQuiet = false;
+let lastScanTs = 0, scanning = false;
 async function autoScan() {
   if (!currentSsid) await refreshStatus();
-  if (lastNets.length && Date.now() - lastScanTs < 20000) { renderScan(true); return; }
-  scanQuiet = true; $("wifi-scan-btn").click();
+  if (lastNets.length && Date.now() - lastScanTs < 20000) { renderScan(); return; }
+  $("wifi-scan-btn").click();
 }
-$("wifi-band").onchange = () => { if (lastNets.length) renderScan(); };
+$("wifi-band").onchange = () => { if (lastNets.length) renderScan(); };   // (no text output either)
 // ---- pick a specific access point (BSSID) of the chosen network, e.g. the AP in the room being tested
 // names live on the Pi (survive cleared browser data); any names saved by older versions in this browser are uploaded once
 async function fetchApNames() {
@@ -620,13 +770,21 @@ $("wifi-ap-name").onclick = () => {
     } catch (e) { $("wifi-ap-note").textContent = "❌ Could not save the name: " + e.message; }
   }).catch(e => { $("wifi-ap-note").textContent = "❌ " + e.message; });
 };
+function scanBusy(on) {
+  scanning = on;
+  const b = $("wifi-scan-btn"); b.disabled = on;
+  if (on) b.innerHTML = "<span class='spin'></span>Scanning…"; else b.textContent = "Scan Networks";
+  $("sig-scanning").classList.toggle("hidden", !on); $("sig-graph").classList.toggle("dim", on);
+  if (curPage === "wifi") renderHeader();
+}
 $("wifi-scan-btn").onclick = async () => {
-  const quiet = scanQuiet; scanQuiet = false;   // the automatic scan on entering the page just feeds the graph, it doesn't pop the console open
-  if (!quiet) busy("Scanning networks"); const sel = $("wifi-list"); sel.innerHTML = "<option>Scanning…</option>"; $("sig-note").textContent = "Scanning…";
+  if (scanning) return;                                  // one scan at a time, however often it is tapped
+  scanBusy(true);
+  const sel = $("wifi-list"); sel.innerHTML = "<option>Scanning…</option>"; $("sig-note").textContent = "Scanning…";
   try {
-    const d = await api("/api/scanall", {}); lastNets = d.networks || []; lastScanTs = Date.now(); renderScan(quiet);
-  } catch (e) { if (!quiet) show(e.message); else $("sig-note").textContent = e.message; }
-  if (!quiet) busy("");
+    const d = await api("/api/scanall", {}); lastNets = d.networks || []; lastScanTs = Date.now(); renderScan();
+  } catch (e) { $("sig-note").textContent = e.message; sel.innerHTML = "<option>Scan failed - tap Scan again</option>"; }
+  scanBusy(false);
 };
 $("wifi-join-btn").onclick = async () => {
   const ssid = $("wifi-list").value;
@@ -652,60 +810,390 @@ function renderBand(title, map) {
 }
 function best24(m) { let bc = null, bs = Infinity; [1, 6, 11].forEach(c => { let sc = 0; Object.keys(m).forEach(k => { const ov = 5 - Math.abs(+k - c); if (ov > 0) sc += m[k].count * ov; }); if (sc < bs) { bs = sc; bc = c; } }); return bc; }
 function best5(m) { let bc = null, bs = Infinity; [36, 40, 44, 48, 149, 153, 157, 161].forEach(c => { const sc = m[c] ? m[c].count : 0; if (sc < bs) { bs = sc; bc = c; } }); return bc; }
-$("btn-chan").onclick = async () => {
-  busy("Channel Analyzer");
-  try {
-    const d = await api("/api/channel", {});
-    let s = renderBand("=== 2.4 GHz ===", d.band24 || {}) + "  >> Best 2.4GHz: channel " + best24(d.band24 || {}) + " (1/6/11 only)\n\n";
-    s += renderBand("=== 5 GHz ===", d.band5 || {}) + "  >> Suggested 5GHz: channel " + best5(d.band5 || {}) + "\n\n";
-    const b6 = d.band6 || {}; s += renderBand("=== 6 GHz (WiFi 6E) ===", b6);
-    s += Object.keys(b6).length ? "  >> 6 GHz is nearly empty almost everywhere — a 6E-capable AP here gets a clean band.\n" : "  (no 6 GHz networks here — nobody's using WiFi 6E yet)\n";
-    show(s);
-  } catch (e) { show(e.message); }
-  busy("");
+// ---------- full-screen tool page: open(title, {load, every}) -> load() runs now and every `every` ms while open ----------
+const tv = { timer: null, load: null, every: 0, busy: false, paused: false };
+function tvOpen(title, load, every) {
+  tvClose(true);
+  tv.load = load; tv.every = every || 0; tv.paused = false; tv.loaded = false;
+  $("tv-title").textContent = title; $("tv-body").innerHTML = "<div class='tv-empty'><span class='spin'></span> Loading…</div>";
+  $("tv-refresh").textContent = every ? "Pause" : "Refresh";
+  $("tv").showModal(); tvRun();
+}
+async function tvRun() {
+  clearTimeout(tv.timer);
+  if (!$("tv").open || !tv.load) return;
+  if (!tv.busy) {
+    tv.busy = true;
+    if (!tv.every || tv.every >= 3000 || !tv.loaded)          // a page that updates every second would just blink
+      $("tv-live").innerHTML = "<span class='spin'></span> " + (tv.every ? "Live · updating…" : "Scanning…");
+    tv.loaded = true;
+    try { await tv.load(); $("tv-live").innerHTML = (tv.every && !tv.paused ? "<span class='on'>● Live</span> · " : "") + "updated " + new Date().toLocaleTimeString(); }
+    catch (e) { $("tv-live").textContent = "⚠ " + e.message; }
+    tv.busy = false;
+  }
+  if (tv.every && !tv.paused && $("tv").open) tv.timer = setTimeout(tvRun, tv.every);
+}
+function tvClose(quiet) { clearTimeout(tv.timer); tv.load = null; if (!quiet && $("tv").open) $("tv").close(); }
+$("tv-close").onclick = () => tvClose();
+$("tv").addEventListener("close", () => { clearTimeout(tv.timer); tv.load = null; });
+$("tv-refresh").onclick = () => {
+  if (!tv.every) return tvRun();
+  tv.paused = !tv.paused; $("tv-refresh").textContent = tv.paused ? "Resume" : "Pause";
+  if (tv.paused) { clearTimeout(tv.timer); $("tv-live").textContent = "Paused · " + $("tv-live").textContent.replace(/^.*?updated/, "updated"); } else tvRun();
 };
+const chOf = (f) => !f ? null : f < 3000 ? Math.round((f - 2407) / 5) : f < 5925 ? Math.round((f - 5000) / 5) : Math.round((f - 5950) / 5);
+
+// ---------- Channel Analyzer: crowding per channel, best channel, the one you're on (live every 20 s) ----------
+let chBand = "2.4", chOpen = {};
+function chRows(map, list, you, best) {
+  const chans = [...new Set([...Object.keys(map).map(Number), ...list])].sort((a, b) => a - b);
+  const max = Math.max(4, ...chans.map(c => (map[c] || {}).count || 0));
+  return chans.map(c => {
+    const e = map[c] || { count: 0, best: 0, ssids: [] }, n = e.count;
+    const cls = n === 0 ? "free" : n <= 2 ? "" : n <= 5 ? "mid" : "busy";
+    const nets = chOpen[chBand + c] && e.ssids.length ? "<div class='ch-nets'>" + e.ssids.map(x => esc(x.ssid) + " " + x.sig + "%").join(" · ") + "</div>" : "";
+    const tags = (c === best ? "<span class='ch-tag best'>BEST</span>" : "") + (c === you ? "<span class='ch-tag you'>YOU</span>" : "");
+    return "<div class='ch-row " + cls + "' data-ch='" + c + "'><div class='ch-num'><span>ch " + c + "</span>" + (tags ? "<span>" + tags + "</span>" : "") + "</div><div class='ch-bar'><div class='ch-fill' style='width:" + Math.round(100 * n / max) + "%'></div></div>" +
+      "<div class='ch-cnt'><b>" + n + "</b> " + (n === 1 ? "network" : "networks") + (n ? "<br>strongest " + e.best + "%" : "") + "</div>" + nets + "</div>";
+  }).join("");
+}
+async function chLoad() {
+  const [d, st] = await Promise.all([api("/api/channel", {}), api("/api/status").catch(() => ({}))]);
+  chRender(d, st);
+}
+function chRender(d, st) {
+  const lk = parseLink((st && st.link) || ""), f = parseFloat(lk.freq), you = chOf(f), youBand = f ? (f < 3000 ? "2.4" : f < 5925 ? "5" : "6") : "";
+  const maps = { "2.4": d.band24 || {}, "5": d.band5 || {}, "6": d.band6 || {} };
+  const b24 = best24(maps["2.4"]), b5 = best5(maps["5"]), n6 = Object.values(maps["6"]).reduce((a, e) => a + e.count, 0);
+  const tot = (m) => Object.values(m).reduce((a, e) => a + e.count, 0);
+  const card = (k, v, s, cls) => "<div class='tv-card " + (cls || "") + "'><div class='k'>" + k + "</div><div class='v'>" + v + "</div><div class='s'>" + s + "</div></div>";
+  const youTxt = you ? "ch " + you + " · " + youBand + " GHz" : "not connected";
+  const lists = { "2.4": [1, 6, 11], "5": [36, 40, 44, 48, 149, 153, 157, 161], "6": [] };
+  const best = { "2.4": b24, "5": b5, "6": null }[chBand];
+  $("tv-body").innerHTML =
+    "<div class='tv-cards'>" + card("Best 2.4 GHz", "ch " + b24, "least crowded of 1 / 6 / 11", "good") + card("Suggested 5 GHz", "ch " + b5, "fewest networks", "good") +
+      card("6 GHz (Wi-Fi 6E)", n6 ? n6 + " nets" : "empty", n6 ? "still far less crowded" : "a clean band for a 6E AP", n6 ? "" : "good") +
+      card("You are on", you ? "ch " + you : "—", (lk.ssid ? esc(lk.ssid) + " · " : "") + youTxt) + "</div>" +
+    "<div class='seg slim' id='ch-seg'>" + ["2.4", "5", "6"].map(b => "<button data-b='" + b + "' class='" + (b === chBand ? "on" : "") + "'>" + b + " GHz · " + tot(maps[b]) + "</button>").join("") + "</div>" +
+    "<div class='tv-h'>Tap a channel to see its networks. Green = room to spare, amber = busy, red = crowded.</div>" +
+    (Object.keys(maps[chBand]).length || lists[chBand].length ? chRows(maps[chBand], lists[chBand], youBand === chBand ? you : null, best)
+      : "<div class='tv-empty'>No " + chBand + " GHz networks here.</div>");
+  document.querySelectorAll("#ch-seg button").forEach(b => b.onclick = () => { chBand = b.dataset.b; chRender(d, st); });
+  document.querySelectorAll("#tv-body .ch-row").forEach(r => r.onclick = () => { const k = chBand + r.dataset.ch; chOpen[k] = !chOpen[k]; chRender(d, st); });
+}
+$("btn-chan").onclick = () => { chOpen = {}; tvOpen("Channel Analyzer", chLoad, 20000); };
 
 // APs & roaming
-function apsText(d) {
-  if (!d.aps || !d.aps.length) return "No APs seen for " + (d.ssid || "(not connected)") + ".";
-  return "APs broadcasting \"" + d.ssid + "\" (" + d.aps.length + "):\n\n" + d.aps.map(a => (a.current ? "▶ " : "  ") + (a.name ? a.name + " · " : "") + a.bssid + "  " + String(a.signal + "%").padStart(4) + "  " + a.band + "G ch " + String(a.ch).padEnd(4) + (a.current ? "  ← connected here" : "")).join("\n") +
-    "\n\n▶ = the AP you're on. If a stronger one is listed, the client is sticky or the AP's roaming settings need work.";
+$("btn-aps").onclick = () => tvOpen("APs for this SSID", apsLoad, 20000);
+// ---------- Watch Roaming: the AP you're on, every AP of this network, a signal trace with roam marks (live every 5 s) ----------
+const roam = { last: null, log: [], trace: [], n: 0, sticky: 0, start: 0 };
+const apLabel = (a) => (a.name ? esc(a.name) + " <small>" + esc(a.bssid.slice(-8)) + "</small>" : "AP <small>" + esc(a.bssid.slice(-8)) + "</small>");   // name it in Signal > AP picker
+function roamDraw() {
+  const c = $("roam-graph"); if (!c) return;
+  const w = c.clientWidth, h = c.clientHeight, x = c.getContext("2d"), dpr = devicePixelRatio || 1;
+  c.width = w * dpr; c.height = h * dpr; x.scale(dpr, dpr); x.clearRect(0, 0, w, h);
+  x.strokeStyle = "rgba(147,161,189,.18)"; x.lineWidth = 1; x.fillStyle = "rgba(147,161,189,.7)"; x.font = "11px sans-serif";
+  [25, 50, 75].forEach(p => { const y = h - p / 100 * h; x.beginPath(); x.moveTo(0, y); x.lineTo(w, y); x.stroke(); x.fillText(p + "%", 4, y - 3); });
+  const pts = roam.trace.slice(-60); if (pts.length < 1) return;
+  const step = w / Math.max(pts.length - 1, 12);              // fills the width as it grows, max 60 readings (5 min)
+  pts.forEach((p, i) => { if (p.roam) { x.strokeStyle = "#f97316"; x.lineWidth = 2; x.beginPath(); x.moveTo(i * step, 0); x.lineTo(i * step, h); x.stroke(); } });
+  x.strokeStyle = "#60a5fa"; x.lineWidth = 2.5; x.beginPath();
+  pts.forEach((p, i) => { const y = h - (p.sig / 100) * h; i ? x.lineTo(i * step, y) : x.moveTo(i * step, y); }); x.stroke();
 }
-$("btn-aps").onclick = async () => { busy("Scanning APs"); try { show(apsText(await api("/api/aps", {}))); } catch (e) { show(e.message); } busy(""); };
-let roamTimer = null, roamLast = null, roamLog = [];
-$("btn-roam").onclick = async () => {
-  const b = $("btn-roam");
-  if (roamTimer) { clearInterval(roamTimer); roamTimer = null; b.textContent = "Watch Roaming"; liveStatus(""); return; }
-  b.textContent = "Stop Watching"; liveStatus("📡 Watching for AP roams — every 6s"); roamLog = []; roamLast = null; const pg = outPage, showL = (t) => show(t, pg);
-  const poll = async () => { try {
-    const d = await api("/api/aps", { rescan: false }); const cur = d.aps.find(a => a.current); const now = new Date().toLocaleTimeString();
-    if (cur && roamLast && cur.bssid !== roamLast.bssid) roamLog.push(now + "  ROAMED " + roamLast.bssid + " (" + roamLast.signal + "%) → " + cur.bssid + " (" + cur.signal + "%)");
-    if (cur) roamLast = cur;
-    showL((cur ? "Now on " + cur.bssid + "  " + cur.signal + "%  " + cur.band + "G ch " + cur.ch : "Not connected") + "\n\n" + (roamLog.length ? "Roam log:\n" + roamLog.join("\n") : "No roams yet — walk around the site.") + "\n\n" + apsText(d).split("\n\n").slice(0, 2).join("\n\n"));
-  } catch (e) {} };
-  poll(); roamTimer = setInterval(poll, 6000);
-};
+async function roamLoad() {
+  roam.n++;
+  const d = await api("/api/aps", { rescan: roam.n % 6 === 1 });        // fresh neighbour scan every ~30 s, cheap reads in between
+  const aps = d.aps || [], cur = aps.find(a => a.current), now = new Date().toLocaleTimeString();
+  const roamed = cur && roam.last && cur.bssid !== roam.last.bssid;
+  if (roamed) roam.log.unshift({ t: now, from: roam.last, to: cur });
+  if (cur) { roam.trace.push({ sig: cur.signal, roam: roamed }); roam.last = cur; }
+  const better = cur && aps.find(a => !a.current && a.signal >= cur.signal + 15);
+  roam.sticky = better ? roam.sticky + 1 : 0;
+  const mins = Math.max(1, Math.round((Date.now() - roam.start) / 60000));
+  const card = (k, v, s, cls) => "<div class='tv-card " + (cls || "") + "'><div class='k'>" + k + "</div><div class='v'>" + v + "</div><div class='s'>" + s + "</div></div>";
+  const q = cur ? (cur.signal >= 70 ? "good" : cur.signal >= 45 ? "warn" : "bad") : "bad";
+  $("tv-body").innerHTML =
+    "<div class='tv-cards'>" + card("Connected to", cur ? apLabel(cur) : "—", cur ? cur.band + " GHz · ch " + cur.ch : "not connected", "") +
+      card("Signal", cur ? cur.signal + "%" : "—", cur ? (q === "good" ? "strong" : q === "warn" ? "okay" : "weak") : "", q) +
+      card("Roams", String(roam.log.length), "in " + mins + " min of watching", "") + card("APs of “" + esc(d.ssid || "?") + "”", String(aps.length), "broadcasting nearby", "") + "</div>" +
+    (roam.sticky >= 2 ? "<div class='roam-warn'>⚠ " + apLabel(better) + " is " + (better.signal - cur.signal) + "% stronger but the Pi stays on " + apLabel(cur) +
+      ". Sticky client, or the APs' roaming settings (minimum RSSI / 802.11k/v/r) need work.</div>" : "") +
+    "<div class='tv-h'>Signal of the AP you're on (orange line = a roam). Walk the site; the Pi roams like a phone would.</div>" +
+    "<canvas id='roam-graph' class='roam-graph'></canvas>" +
+    "<div class='tv-h'>Access points of this network</div>" +
+    (aps.length ? aps.map(a => "<div class='ap-row" + (a.current ? " cur" : "") + "'><div class='ap-name'>" + (a.current ? "▶ " : "") + apLabel(a) + " <small>· " + a.band + "G ch " + a.ch + "</small></div>" +
+      "<div class='ch-bar'><div class='ch-fill' style='width:" + a.signal + "%'></div></div><div class='ap-sig'>" + a.signal + "%</div></div>").join("")
+      : "<div class='tv-empty'>No access points seen for this network.</div>") +
+    "<div class='tv-h'>Roam log</div>" +
+    (roam.log.length ? roam.log.map(e => "<div class='roam-ev'>" + esc(e.t) + " · <b>roamed</b> " + apLabel(e.from) + " (" + e.from.signal + "%) → " + apLabel(e.to) + " (" + e.to.signal + "%)</div>").join("")
+      : "<div class='tv-empty'>No roams yet: walk around the site.</div>");
+  roamDraw();
+}
+$("btn-roam").onclick = () => { Object.assign(roam, { last: null, log: [], trace: [], n: 0, sticky: 0, start: Date.now() }); tvOpen("Watch Roaming", roamLoad, 5000); };
+
+// ---------- shared bits for the tool pages ----------
+const tvCard = (k, v, s, cls) => "<div class='tv-card " + (cls || "") + "'><div class='k'>" + k + "</div><div class='v'>" + v + "</div><div class='s'>" + (s || "") + "</div></div>";
+const verdict = (cls, head, sub) => "<div class='svc-sum " + cls + "'>" + head + (sub ? "<small>" + sub + "</small>" : "") + "</div>";
+const tvWait = (msg) => { if ($("tv-body").querySelector(".tv-empty")) $("tv-body").innerHTML = "<div class='tv-empty'><span class='spin'></span> " + msg + "</div>"; };
+
+// ---------- APs for this SSID: every access point of the network you're on, strongest first (live every 20 s) ----------
+async function apsLoad() {
+  tvWait("Scanning for every access point of this network (a few seconds)…");
+  const d = await api("/api/aps", {}), aps = d.aps || [], cur = aps.find(a => a.current), best = aps[0];
+  const better = cur && aps.find(a => !a.current && a.signal >= cur.signal + 15);
+  const bands = [...new Set(aps.map(a => a.band))].sort().map(b => b + " GHz").join(" + ");
+  $("tv-body").innerHTML =
+    (!d.ssid ? verdict("bad", "Not connected to Wi-Fi", "join a network on the Signal page first")
+      : better ? verdict("bad", "⚠ A stronger AP is right here", apLabel(better) + " is " + (better.signal - cur.signal) + "% stronger than " + apLabel(cur) + " (the one the Pi is on): a sticky client, or the APs' roaming settings need work")
+      : verdict("", "✅ " + aps.length + " access point" + (aps.length === 1 ? "" : "s") + " broadcast “" + esc(d.ssid) + "”", cur ? "you're on the " + (cur === best ? "strongest" : "a good") + " one: " + apLabel(cur) + " · " + cur.signal + "% · " + cur.band + " GHz ch " + cur.ch : "")) +
+    "<div class='tv-cards'>" + tvCard("Access points", String(aps.length), bands || "—") + tvCard("You're on", cur ? apLabel(cur) : "—", cur ? cur.band + " GHz · ch " + cur.ch : "") +
+      tvCard("Signal", cur ? dbmOf(cur.signal) + " <small>dBm</small>" : "—", cur ? cur.signal + "%" : "", cur ? (cur.signal >= 70 ? "good" : cur.signal >= 45 ? "warn" : "bad") : "") +
+      tvCard("Strongest", best ? best.signal + "%" : "—", best ? apLabel(best) : "") + "</div>" +
+    "<div class='tv-h'>Strongest first (signal in dBm) · ▶ = the one the Pi is on · rescans every 20 s</div>" +
+    (aps.length ? aps.map(a => "<div class='ap-row" + (a.current ? " cur" : "") + "'><div class='ap-name'>" + (a.current ? "▶ " : "") + apLabel(a) + " <small>· " + a.band + "G ch " + a.ch + " · " + esc(a.bssid) + "</small></div>" +
+      "<div class='ch-bar'><div class='ch-fill' style='width:" + a.signal + "%'></div></div><div class='ap-sig'>" + dbmOf(a.signal) + "</div></div>").join("")
+      : "<div class='tv-empty'>No access points seen for this network.</div>") +
+    "<div class='res-foot'>Name an AP in Signal › Name APs and it shows here. dBm estimated from signal %.</div>";
+}
+
+// ---------- Public IP & ISP ----------
+async function pubipLoad() {
+  const d = await api("/api/pubip", {}), i = d.info || {};
+  if (!i.ip) { $("tv-body").innerHTML = verdict("bad", "Couldn't look up the public IP", "no internet, or the lookup service didn't answer") + "<pre class='tv-pre'>" + esc(d.output || "") + "</pre>"; return; }
+  const place = [i.city, i.region, i.country_name || i.country].filter(Boolean).join(", ");
+  $("tv-body").innerHTML =
+    "<div class='pip-hero'><div class='k'>The internet sees this site as</div><div class='ip' id='pip-ip'>" + esc(i.ip) + "</div>" +
+      "<div class='s'>" + esc(i.isp || "") + (i.asn ? " · " + esc(i.asn) : "") + "</div></div>" +
+    "<div class='tv-cards'>" + tvCard("Internet provider", esc(i.isp || "—"), esc([i.asn, i.domain].filter(Boolean).join(" · "))) +
+      tvCard("Location", esc(i.city || i.country || "—"), esc(place) + " (approximate)") +
+      tvCard("IPv6", d.ipv6 ? "Yes" : "No", d.ipv6 ? esc(d.ipv6) : "this network only gives IPv4", d.ipv6 ? "good" : "") +
+      (i.hostname ? tvCard("Reverse name", "<span class='sm'>" + esc(i.hostname) + "</span>", "") : "") +
+      (i.timezone ? tvCard("Time zone", esc(i.timezone.split("/").pop().replace(/_/g, " ")), esc(i.timezone)) : "") + "</div>" +
+    "<div class='pad'><button id='pip-copy' class='block'>Copy IP</button></div>" +
+    "<div class='res-foot'>Use it for firewall / POS allow-lists, or tell the ISP. A different IP than the router's WAN page usually means the ISP uses CGNAT.</div>";
+  $("pip-copy").onclick = async () => { const b = $("pip-copy"); try { await navigator.clipboard.writeText(i.ip); b.textContent = "Copied ✓"; } catch (e) { b.textContent = "Can't copy"; } setTimeout(() => { b.textContent = "Copy IP"; }, 1500); };
+}
+
+// ---------- DNS Check: this network's DNS side by side with public DNS ----------
+async function dnsCheckLoad() {
+  tvWait("Asking your DNS and 3 public DNS servers the same questions…");
+  const d = await api("/api/dnscheck", {}), rows = d.rows || [], mine = rows.filter(r => r.mine), pub = rows.filter(r => !r.mine);
+  const fastPub = Math.min(...pub.filter(r => r.avg != null).map(r => r.avg), Infinity), m = mine[0] || rows[0];
+  let v;
+  if (!m || m.avg == null) v = verdict("bad", "❌ Your DNS server isn't answering", (m ? esc(m.server) : "") + " — websites won't load even though the internet is up. Check the router's DNS, or set 1.1.1.1 / 8.8.8.8.");
+  else if (m.avg > 150) v = verdict("bad", "⚠ DNS is slow · " + m.avg + " ms", "every new website waits this long before loading. Public DNS answered in " + (isFinite(fastPub) ? fastPub + " ms" : "—") + ".");
+  else if (isFinite(fastPub) && m.avg > fastPub * 3 + 30) v = verdict("bad", "⚠ Your DNS is slower than public DNS", m.avg + " ms vs " + fastPub + " ms — consider pointing the router at 1.1.1.1 or 8.8.8.8.");
+  else if (m.fail) v = verdict("bad", "⚠ Some lookups failed", m.fail + " of " + (m.ok + m.fail) + " questions got no answer from " + esc(m.server));
+  else v = verdict("", "✅ DNS is healthy · " + m.avg + " ms", "your DNS (" + esc(m.server) + ") answers every question" + (isFinite(fastPub) ? "; public DNS: " + fastPub + " ms" : ""));
+  const scale = Math.max(100, ...rows.map(r => r.max || 0));
+  const tile = (r) => { const w = r.avg == null ? 0 : Math.max(3, Math.round(r.avg / scale * 100)), cls = r.avg == null ? "" : r.avg > 150 ? "slow" : r.avg > 60 ? "mid" : "";
+    return "<div class='svc-tile" + (r.avg == null || r.fail ? " down" : r.mine ? " mine" : "") + "'><div class='n'><span>" + esc(r.mine ? "Your DNS" : r.label) + "</span><b>" + (r.avg == null ? "no answer" : r.avg + " ms") + "</b></div>" +
+      "<div class='d'>" + esc(r.server) + (r.avg != null ? " · " + r.min + "–" + r.max + " ms" : "") + (r.fail ? " · " + r.fail + " failed" : "") + "</div><div class='lat'><i class='" + cls + "' style='width:" + w + "%'></i></div></div>"; };
+  const names = d.names || [];
+  $("tv-body").innerHTML = v +
+    "<div class='tv-h'>Average answer time (same " + names.length + " names to each server)</div><div class='svc-grid'>" + rows.map(tile).join("") + "</div>" +
+    "<div class='tv-h'>Typo protection</div>" +
+    (d.hijack ? "<div class='roam-warn'>⚠ This DNS answers names that don't exist (ISP “search help” / ad redirect, or a filter). Apps that check for errors can misbehave.</div>"
+      : "<div class='svc-ev'>✅ Made-up names get “doesn't exist” (" + esc(d.nx_status || "NXDOMAIN") + ") — no hijacking.</div>") +
+    "<div class='tv-h'>Every answer (ms)</div><table class='dns dnsc'><thead><tr><th>Server</th>" + names.map(n => "<th>" + esc(n.replace(/\.com$/, "")) + "</th>").join("") + "</tr></thead><tbody>" +
+      rows.map(r => "<tr><td class='t'>" + esc(r.label) + "<small>" + esc(r.server) + "</small></td>" + r.results.map(x => "<td class='" + (x.ms == null ? "bad" : "") + "'>" + (x.ms == null ? esc(x.status) : x.ms) + "</td>").join("") + "</tr>").join("") +
+    "</tbody></table><div class='res-foot'>Your DNS: " + esc((d.resolvers || []).join(", ") || "system") + " (from this network's DHCP). Tap Refresh to run it again — the second run shows cached speed.</div>";
+}
+
+// ---------- Rogue DHCP Check ----------
+async function dhcpLoad() {
+  tvWait("Asking every DHCP server on this network to answer (~10 s)…");
+  const d = await api("/api/dhcp", {}), offers = d.offers || [], srv = d.servers || [];
+  const v = !srv.length ? verdict("bad", "No DHCP server answered on " + esc(d.iface || "?"), "a network with static addresses, or the DHCP server is slow / filtered. Try again.")
+    : d.rogue ? verdict("bad", "⚠ Rogue DHCP suspected · " + srv.length + " servers answered", "only one device should hand out addresses. The extra one (often a home router plugged in backwards, or an AP in router mode) gives devices wrong settings at random.")
+    : verdict("", "✅ One DHCP server · no rogue", esc(srv[0]) + " is the only one handing out addresses on " + esc(d.iface || "?"));
+  const row = (k, val) => val ? "<div class='dd-row'><span class='k'>" + k + "</span><span class='v'>" + esc(val) + "</span></div>" : "";
+  $("tv-body").innerHTML = v + (offers.length ? offers.map((o, i) => {
+    const gwOk = d.gateway && o.router && o.router.split(/[ ,]+/).includes(d.gateway);
+    return "<div class='tv-h'>Server " + (i + 1) + (d.rogue ? (gwOk ? " · <span class='nm-ok'>matches your gateway</span>" : " · <span class='nm-bad'>NOT your gateway — likely the rogue</span>") : "") + "</div><div class='kv'>" +
+      row("DHCP server", o.server) + row("Offered address", o.offered) + row("Gateway (router)", o.router) + row("DNS", o.dns) + row("Subnet mask", o.mask) + row("Lease time", o.lease) + row("Domain", o.domain) + "</div>"; }).join("") : "") +
+    "<div class='res-foot'>The Pi sends one DHCP discover on " + esc(d.iface || "?") + " and lists every answer; it does not take an address.</div>";
+}
+
+// ---------- Ethernet Jack Test: waits for a cable, then link / DHCP / switch port / VLAN / internet ----------
+const JACK_ICON = { ok: "✓", warn: "!", bad: "✕", info: "i" };
+async function jackLoad() {
+  const l = await api("/api/jack/link");
+  if (!l.link) {
+    $("tv-body").innerHTML = "<div class='jack-wait'><div class='plug'>🔌</div><div class='h'>Plug the Pi's Ethernet port into the wall jack</div>" +
+      "<div class='s'><span class='spin'></span> Waiting for a link on " + esc(l.iface) + "… the test starts by itself.</div></div>" +
+      "<div class='res-foot'>No link after a minute = a dead jack, an unpatched port, or a switch port that's shut down.</div>";
+    clearTimeout(tv.timer); tv.timer = setTimeout(() => { if ($("tv").open && tv.load === jackLoad) tvRun(); }, 2000);
+    return;
+  }
+  $("tv-body").innerHTML = verdict("", "Link up · " + esc(l.speed) + " Mb/s " + esc(l.duplex), "<span class='spin'></span> testing DHCP, switch port, VLAN tags and internet (~15 s)…");
+  const d = await api("/api/jack", {}), ch = d.checks || [];
+  const bad = ch.find(c => c.state === "bad"), warn = ch.find(c => c.state === "warn");
+  $("tv-body").innerHTML = (bad ? verdict("bad", "❌ " + esc(bad.title), esc(bad.detail)) : warn ? verdict("bad", "⚠ Works, but: " + esc(warn.title), esc(warn.detail)) : verdict("", "✅ This jack is good", "link, address, and internet all work")) +
+    "<div class='chk'>" + ch.map(c => "<div class='chk-row " + c.state + "'><i>" + JACK_ICON[c.state] + "</i><div><b>" + esc(c.title) + "</b>" + (c.detail ? "<small>" + esc(c.detail) + "</small>" : "") + "</div></div>").join("") + "</div>" +
+    "<div class='res-foot'>Move to the next jack and tap Refresh. The switch name / port needs LLDP or CDP on the switch (Omada: on by default).</div>";
+}
+
+// ---------- Open Ports (this Pi): what's listening, who can reach it ----------
+const PORT_NAMES = { 22: "SSH", 53: "DNS", 67: "DHCP server", 68: "DHCP client", 80: "Web", 123: "Time (NTP)", 443: "Web (HTTPS)", 631: "Printing", 1900: "UPnP", 5201: "iPerf3 speed server",
+  5353: "Bonjour (mDNS)", 8086: "InfluxDB", 8088: "InfluxDB admin", 8092: "Jarvis Net Tools (this app)", 34001: "Pironman case dashboard", 51820: "WireGuard VPN" };
+async function portsLoad() {
+  const d = await api("/api/ports", {}), ls = d.listeners || [];
+  const temp = (r) => r.proto === "udp" && r.port >= 32768 && !PORT_NAMES[r.port];
+  const net = ls.filter(r => r.scope !== "local" && !temp(r)), loc = ls.filter(r => r.scope === "local" && !temp(r)), tmp = ls.filter(temp);
+  const row = (r) => "<div class='port-row'><span class='pn'>" + r.port + "<small>/" + r.proto + "</small></span><span class='pd'><b>" + esc(PORT_NAMES[r.port] || r.process || "unknown") + "</b><small>" +
+    esc((r.process ? r.process + " · " : "") + (r.scope === "all" ? "every network" + (r.iface ? " (" + r.iface + ")" : "") : r.scope === "one" ? "only on " + r.addr : "this Pi only")) + "</small></span></div>";
+  $("tv-body").innerHTML = verdict("", net.length + " service" + (net.length === 1 ? "" : "s") + " reachable from the network", "what this Pi itself answers on — the firewall still decides who gets in") +
+    "<div class='tv-h'>Reachable from the network</div>" + (net.map(row).join("") || "<div class='tv-empty'>none</div>") +
+    "<div class='tv-h'>Only on this Pi (localhost)</div>" + (loc.map(row).join("") || "<div class='tv-empty'>none</div>") +
+    (tmp.length ? "<details class='hist'><summary>" + tmp.length + " temporary UDP ports (apps talking out — normal)</summary>" + tmp.map(row).join("") + "</details>" : "") +
+    "<div class='res-foot'>To scan another device's ports use Tools › Ports.</div>";
+}
+
+// ---------- Bandwidth Now: live Mbps through this Pi, per interface (every second) ----------
+const bw = { prev: null, hist: {}, peak: {}, total: {}, sel: null };
+const IF_LABEL = (n) => n === "eth0" ? "Ethernet" : n === "wlan1" ? "Wi-Fi" : n === "wlan0" ? "Setup hotspot" : /^wg/.test(n) ? "VPN" : /^usb/.test(n) ? "USB" : n;
+const fmtMbps = (v) => v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
+const fmtBytes = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.round(b / 1e3) + " kB";
+function bwDraw() {
+  const c = $("bw-graph"); if (!c) return;
+  const { g, W, H, d } = prep(c), pts = (bw.hist[bw.sel] || []).slice(-120), mx = Math.max(1, ...pts.map(p => Math.max(p.rx, p.tx))) * 1.15;
+  g.strokeStyle = GRID; g.lineWidth = 1; g.fillStyle = AXIS; g.font = 11 * d + "px sans-serif";
+  [0.5, 1].forEach(k => { const y = H - (H - 14 * d) * k; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); g.fillText(fmtMbps(mx * k) + " Mbps", 4 * d, y + 12 * d); });
+  if (pts.length < 2) return;
+  const step = W / Math.max(pts.length - 1, 30), Y = (v) => H - (v / mx) * (H - 14 * d);
+  [["rx", "#f97316"], ["tx", "#3b82f6"]].forEach(([k, col]) => { g.strokeStyle = col; g.lineWidth = 2.5 * d; g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(i * step, Y(p[k])) : g.moveTo(0, Y(p[k]))); g.stroke(); });
+}
+async function bwLoad() {
+  const d = await api("/api/bandwidth/now"), ifs = d.ifaces || {};
+  if (bw.prev) {
+    const dt = Math.max(0.2, d.ts - bw.prev.ts);
+    Object.keys(ifs).forEach(n => { const a = ifs[n], b = bw.prev.ifaces[n]; if (!b) return;
+      const rx = Math.max(0, a.rx - b.rx) * 8 / dt / 1e6, tx = Math.max(0, a.tx - b.tx) * 8 / dt / 1e6;
+      (bw.hist[n] = bw.hist[n] || []).push({ rx, tx }); if (bw.hist[n].length > 300) bw.hist[n].shift();
+      const pk = bw.peak[n] = bw.peak[n] || { rx: 0, tx: 0 }; pk.rx = Math.max(pk.rx, rx); pk.tx = Math.max(pk.tx, tx);
+      const t = bw.total[n] = bw.total[n] || { rx: 0, tx: 0 }; t.rx += Math.max(0, a.rx - b.rx); t.tx += Math.max(0, a.tx - b.tx); });
+  }
+  bw.prev = d;
+  const names = Object.keys(ifs).filter(n => ifs[n].rx + ifs[n].tx > 0 || n === d.default);
+  if (!bw.sel || !ifs[bw.sel]) bw.sel = ifs[d.default] ? d.default : names[0];
+  if (!$("bw-graph")) $("tv-body").innerHTML = "<div class='pills bw-ifs' id='bw-ifs'></div><div class='tv-cards' id='bw-cards'></div>" +
+    "<div class='tv-h'><span class='key' style='background:#f97316'></span> Download &nbsp; <span class='key' style='background:#3b82f6'></span> Upload · last 2 minutes</div><canvas id='bw-graph' class='sm-graph'></canvas>" +
+    "<div class='res-foot'>Traffic through this Pi only — not the whole network. Start a speed test or a download and watch it move.</div>";
+  const box = $("bw-ifs"), sig = names.join(",") + "|" + bw.sel;
+  if (box.dataset.sig !== sig) {
+    box.dataset.sig = sig;
+    box.innerHTML = names.map(n => "<button type='button' data-n='" + esc(n) + "' class='" + (n === bw.sel ? "on" : "") + "'>" + esc(IF_LABEL(n)) + (n === d.default ? " ★" : "") + "</button>").join("");
+    box.querySelectorAll("button").forEach(b => b.onclick = () => { bw.sel = b.dataset.n; box.dataset.sig = ""; bwLoad(); });
+  }
+  const h = bw.hist[bw.sel] || [], last = h[h.length - 1] || { rx: 0, tx: 0 }, pk = bw.peak[bw.sel] || { rx: 0, tx: 0 }, t = bw.total[bw.sel] || { rx: 0, tx: 0 };
+  $("bw-cards").innerHTML = tvCard("Download", h.length ? fmtMbps(last.rx) + " <small>Mbps</small>" : "…", "peak " + fmtMbps(pk.rx) + " Mbps", "dn") +
+    tvCard("Upload", h.length ? fmtMbps(last.tx) + " <small>Mbps</small>" : "…", "peak " + fmtMbps(pk.tx) + " Mbps", "up") +
+    tvCard("Since opened", fmtBytes(t.rx + t.tx), "↓ " + fmtBytes(t.rx) + " · ↑ " + fmtBytes(t.tx)) + tvCard("Interface", esc(IF_LABEL(bw.sel)), esc(bw.sel) + (bw.sel === d.default ? " · internet goes here" : ""));
+  bwDraw();
+}
+
+// ---------- History: today's tool runs, filter by tool, search, tap to open ----------
+const hist = { entries: [], q: "", f: "All" };
+const histKind = (l) => { l = l.replace(/\s*\(.*\)\s*$/, ""); return /^DNS (?!Check)/.test(l) ? "DNS lookup" : l; };
+function histRender() {
+  const q = hist.q.toLowerCase(), list = hist.entries.filter(e => (hist.f === "All" || histKind(e.label) === hist.f) && (!q || (e.label + " " + e.target + " " + e.text).toLowerCase().includes(q)));
+  $("hist-list").innerHTML = list.length ? list.map(e => "<details class='hist'><summary><span class='ht'>" + esc(e.ts.slice(11, 16)) + "</span><b>" + esc(e.label) + "</b>" + (e.target ? "<span class='hg'>" + esc(e.target) + "</span>" : "") +
+    "<small>" + esc((e.text.split("\n").find(x => x.trim()) || "").slice(0, 90)) + "</small></summary><pre>" + esc(e.text) + "</pre></details>").join("")
+    : "<div class='tv-empty'>" + (hist.entries.length ? "Nothing matches." : "No history yet — run a test first.") + "</div>";
+}
+async function histLoad() {
+  const d = await api("/api/history"); hist.entries = d.entries || [];
+  const kinds = {}; hist.entries.forEach(e => { const k = histKind(e.label); kinds[k] = (kinds[k] || 0) + 1; });
+  if (hist.f !== "All" && !kinds[hist.f]) hist.f = "All";
+  $("tv-body").innerHTML = "<div class='pad tight'><input type='search' id='hist-q' placeholder='Search history (IP, name, tool…)' autocapitalize='off' spellcheck='false'></div>" +
+    "<div class='pills hist-f' id='hist-f'>" + [["All", hist.entries.length]].concat(Object.entries(kinds).sort((a, b) => b[1] - a[1])).map(([k, n]) =>
+      "<button type='button' data-k='" + esc(k) + "' class='" + (k === hist.f ? "on" : "") + "'>" + esc(k) + " <small>" + n + "</small></button>").join("") + "</div>" +
+    "<div id='hist-list'></div><div class='res-foot'>Today only: the history empties on a new day and when you tap Finish Visit (the report keeps it).</div>";
+  $("hist-q").value = hist.q; $("hist-q").oninput = () => { hist.q = $("hist-q").value; histRender(); };
+  $("hist-f").querySelectorAll("button").forEach(b => b.onclick = () => { hist.f = b.dataset.k; $("hist-f").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); histRender(); });
+  histRender();
+}
 
 // live signal meter (two buttons, one state)
-let signalTimer = null;
-function toggleSignal() {
-  const btns = [$("btn-signal"), $("btn-signal2")];
-  if (signalTimer) { clearInterval(signalTimer); signalTimer = null; btns.forEach(b => b.textContent = "Live Signal Meter"); liveStatus(""); return; }
-  btns.forEach(b => b.textContent = "Stop Signal Meter"); liveStatus("📶 Live signal — updating every 2s"); const pg = outPage, showL = (t) => show(t, pg);
-  const poll = async () => { try {
-    const d = await api("/api/signal"); const p = parseLink(d.link);
-    if (!p.sig) { showL("Not connected to WiFi."); return; }
-    const n = parseInt(p.sig, 10), pct = Math.max(0, Math.min(100, 2 * (n + 100))), q = n >= -60 ? "STRONG" : n >= -70 ? "OK" : "WEAK";
-    showL(p.ssid + "  (" + bandOf(+p.freq) + ")\n\nsignal: " + p.sig + " dBm  (" + q + ")\n[" + "#".repeat(Math.round(pct / 5)).padEnd(20, ".") + "] " + pct + "%\nrx rate: " + p.rate + "\n\n(tap Stop to end)");
-  } catch (e) {} };
-  poll(); signalTimer = setInterval(poll, 2000);
+// ---------- Live Signal Meter: a dBm gauge, quality, 2-minute graph, min / avg / max (every second) ----------
+const sm = { pts: [] };
+const SQ = [[-50, "Excellent", "#4ade80"], [-60, "Good", "#4ade80"], [-67, "Fair", "#a3e635"], [-75, "Weak", "#fbbf24"], [-200, "Very weak", "#f87171"]];
+const sq = (d) => SQ.find(([lim]) => d >= lim);
+function smGauge(dbm) {
+  const c = $("sm-gauge"); if (!c) return;
+  const w = c.clientWidth, h = c.clientHeight, x = c.getContext("2d"), dpr = devicePixelRatio || 1;
+  c.width = w * dpr; c.height = h * dpr; x.scale(dpr, dpr);
+  const cx = w / 2, cy = h - 18, r = Math.min(w / 2 - 20, h - 40), a0 = Math.PI, a1 = 2 * Math.PI;
+  const at = (v) => a0 + (Math.max(-100, Math.min(-30, v)) + 100) / 70 * Math.PI;
+  [[-100, -75, "#f87171"], [-75, -67, "#fbbf24"], [-67, -60, "#a3e635"], [-60, -30, "#4ade80"]].forEach(([s, e, col]) => {
+    x.beginPath(); x.arc(cx, cy, r, at(s), at(e)); x.strokeStyle = col; x.globalAlpha = .28; x.lineWidth = 18; x.stroke(); x.globalAlpha = 1; });
+  if (dbm != null) { x.beginPath(); x.arc(cx, cy, r, a0, at(dbm)); x.strokeStyle = sq(dbm)[2]; x.lineWidth = 18; x.lineCap = "round"; x.stroke(); x.lineCap = "butt"; }
+  x.fillStyle = "rgba(147,161,189,.85)"; x.font = "12px sans-serif"; x.textAlign = "center";
+  [-100, -80, -60, -40].forEach(v => { const a = at(v); x.fillText(String(v), cx + Math.cos(a) * (r + 22), cy + Math.sin(a) * (r + 22) + 4); });
+  x.fillStyle = "#e6ecf5"; x.font = "700 44px sans-serif"; x.fillText(dbm == null ? "—" : String(dbm), cx, cy - 28);
+  x.font = "15px sans-serif"; x.fillStyle = "rgba(147,161,189,.95)"; x.fillText("dBm", cx, cy - 6);
 }
+function smGraph() {
+  const c = $("sm-graph"); if (!c) return;
+  const w = c.clientWidth, h = c.clientHeight, x = c.getContext("2d"), dpr = devicePixelRatio || 1;
+  c.width = w * dpr; c.height = h * dpr; x.scale(dpr, dpr);
+  const y = (v) => h - (Math.max(-100, Math.min(-30, v)) + 100) / 70 * h;
+  x.strokeStyle = "rgba(147,161,189,.18)"; x.fillStyle = "rgba(147,161,189,.7)"; x.font = "11px sans-serif";
+  [-90, -75, -60, -45].forEach(v => { x.beginPath(); x.moveTo(0, y(v)); x.lineTo(w, y(v)); x.stroke(); x.fillText(v + "", 4, y(v) - 3); });
+  const pts = sm.pts.slice(-120); if (!pts.length) return;
+  const step = w / Math.max(pts.length - 1, 30);
+  x.lineWidth = 2.5; x.beginPath(); pts.forEach((v, i) => i ? x.lineTo(i * step, y(v)) : x.moveTo(0, y(v)));
+  x.strokeStyle = sq(pts[pts.length - 1])[2]; x.stroke();
+}
+async function smLoad() {
+  const link = (await api("/api/signal")).link || "", p = parseLink(link);
+  const tx = (link.match(/tx bitrate:\s*([\d.]+ \S+)/) || [])[1] || "?", bssid = ((link.match(/Connected to\s+([0-9a-f:]{17})/i) || [])[1] || "").toUpperCase();
+  const dbm = p.sig ? parseInt(p.sig, 10) : null;
+  if (dbm != null) sm.pts.push(dbm);
+  const pts = sm.pts.slice(-120), q = dbm != null ? sq(dbm) : null;
+  const card = (k, v, s) => "<div class='tv-card'><div class='k'>" + k + "</div><div class='v'>" + v + "</div><div class='s'>" + s + "</div></div>";
+  if (!$("sm-gauge")) $("tv-body").innerHTML = "<canvas id='sm-gauge' class='sm-gauge'></canvas><div id='sm-q' class='sm-q'></div><div id='sm-cards' class='tv-cards'></div>" +
+    "<div class='tv-h'>Last 2 minutes. Walk around: it updates every second.</div><canvas id='sm-graph' class='sm-graph'></canvas>";
+  $("sm-q").innerHTML = q ? "<b style='color:" + q[2] + "'>" + q[1] + "</b> · " + esc(p.ssid || "") : "Not connected to Wi-Fi";
+  const f = parseFloat(p.freq), avg = pts.length ? Math.round(pts.reduce((a, b) => a + b, 0) / pts.length) : null;
+  $("sm-cards").innerHTML = card("Band", f ? bandOf(f) : "—", f ? "ch " + chOf(f) + " · " + f + " MHz" : "") +
+    card("Link rate", esc(p.rate.replace(" MBit/s", "")), "down · up " + esc(tx.replace(" MBit/s", "")) + " Mbit/s") +
+    card("Min / Avg / Max", pts.length ? "<span class='mam'>" + Math.min(...pts) + " / " + avg + " / " + Math.max(...pts) + "</span>" : "—", "dBm this session") +
+    card("Access point", bssid ? esc(bssid.slice(-8)) : "—", bssid ? "BSSID " + esc(bssid) : "");
+  smGauge(dbm); smGraph();
+}
+function toggleSignal() { sm.pts = []; tvOpen("Live Signal Meter", smLoad, 1000); }
 $("btn-signal").onclick = toggleSignal; $("btn-signal2").onclick = toggleSignal;
+
+// ---------- Service / POS Check: tiles per group, latency bars, what is on the LAN; re-checks every 30 s ----------
+const svc = { prev: {}, log: [] };
+async function svcLoad() {
+  const d = await api("/api/services", {});
+  const res = d.results || [], bad = res.filter(r => !r.ok), now = new Date().toLocaleTimeString();
+  res.forEach(r => { const was = svc.prev[r.name]; if (was !== undefined && was !== r.ok) svc.log.unshift(now + " · " + r.name + (r.ok ? " is back up" : " went DOWN")); svc.prev[r.name] = r.ok; });
+  const ms = (r) => { const m = /([\d.]+) ms/.exec(r.detail || ""); return m ? parseFloat(m[1]) : null; };
+  const groups = ["Network", "Payments", "Apps", "Your checks"];
+  const tile = (r) => { const t = ms(r), w = t == null ? 0 : Math.min(100, Math.round(t / 10)), cls = t == null ? "" : t < 150 ? "" : t < 500 ? "mid" : "slow";
+    return "<div class='svc-tile" + (r.ok ? "" : " down") + "'><div class='n'><span>" + esc(r.name) + "</span><i class='dot " + (r.ok ? "ok" : "bad") + "'></i></div><div class='d'>" + esc(r.detail || "") +
+      "</div><div class='lat'><i class='" + cls + "' style='width:" + (r.ok ? Math.max(w, 3) : 0) + "%'></i></div></div>"; };
+  const lan = d.lan || { found: {} };
+  $("tv-body").innerHTML =
+    "<div class='svc-sum" + (bad.length ? " bad" : "") + "'>" + (bad.length ? "⚠ " + bad.length + " of " + res.length + " failed" : "✅ All good · " + res.length + " of " + res.length + " reachable") +
+      "<small>" + (bad.length ? esc(bad.map(r => r.name).join(", ")) : "gateway, internet, DNS, payment and app services all answer") + "</small></div>" +
+    groups.map(g => { const rs = res.filter(r => (r.group || "Apps") === g); return rs.length ? "<div class='tv-h'>" + g + "</div><div class='svc-grid'>" + rs.map(tile).join("") + "</div>" : ""; }).join("") +
+    "<div class='tv-h'>On this LAN" + (lan.subnet ? " (" + esc(lan.subnet) + ")" : "") + "</div><div class='svc-lan rows'>" +
+      Object.entries(lan.found || {}).map(([k, v]) => "<div class='row'><span class='lbl'>" + esc(k) + "</span><span class='val'>" + (v && v.length ? esc(v.join(", ")) : "<span class='muted'>none found</span>") +
+        "<i class='dot " + (v && v.length ? "ok" : "") + "'></i></span></div>").join("") + "</div>" +
+    (svc.log.length ? "<div class='tv-h'>Changes while watching</div>" + svc.log.map(e => "<div class='svc-ev'>" + esc(e) + "</div>").join("") : "");
+}
+const services = () => { svc.prev = {}; svc.log = []; tvOpen("Service / POS Check", svcLoad, 30000); };
 
 // ---------- target tools ----------
 function target() { const t = $("target").value.trim(); if (!t) { goto("tools"); $("target").focus(); show("Enter a host or IP in the target box first."); return null; } return t; }
-$("btn-ping").onclick = () => { const t = target(); if (t) livePing(t, 10, { fallback: () => tool("Ping " + t, "/api/ping", { target: t }) }); };
-$("btn-dns").onclick = () => { const t = target(); if (t) tool("DNS Lookup " + t, "/api/dns", { target: t }); };
+$("btn-ping").onclick = () => { const t = target(), o = topt("ping"); if (t) livePing(t, o.count, { ping: { interval: o.interval, size: o.size, df: o.df }, fallback: () => tool("Ping " + t, "/api/ping", { target: t }) }); };
+$("btn-dns").onclick = () => { const t = target(); if (t) dnsLookup(t); };
+$("btn-whois").onclick = () => { const t = target(); if (t) whoisLookup(t); };
 $("btn-iperf").onclick = () => { const t = target(); if (t) tool("LAN speed test to " + t + " (~15s)", "/api/iperf", { target: t }); };
 async function iperfInfo() {
   try { const d = await api("/api/iperf/info");
@@ -787,7 +1275,7 @@ function livePing(target, count, opts) {
     return line;
   };
   return runLive({
-    url: "/api/ping/stream", body: { target, count }, title: opts.title || "Ping " + target, fallback: opts.fallback, spark: true, scroll: true,
+    url: "/api/ping/stream", body: Object.assign({ target, count }, opts.ping || {}), title: opts.title || "Ping " + target, fallback: opts.fallback, spark: true, scroll: true,
     onLine(line) {
       lines.push(pretty(line));
       const m = line.match(/icmp_seq=(\d+).*?time=([\d.]+)\s*ms/), to = line.match(/no answer yet for icmp_seq=(\d+)/);
@@ -805,12 +1293,12 @@ function livePing(target, count, opts) {
 
 // ---- route: a live hop table (mtr raw events: x = probe sent, h = hop host, p = reply, hops are 0-based)
 function liveTrace(target, opts) {
-  opts = opts || {}; const passes = 10, hops = new Map(), firstSeen = {}; let ghostFrom = Infinity;
+  opts = opts || {}; const o = opts.route || {}, passes = o.passes || 10, hops = new Map(), firstSeen = {}; let ghostFrom = Infinity;
   const hop = (n) => { let h = hops.get(n); if (!h) { h = { host: "", sent: 0, recv: 0, sum: 0, best: Infinity, worst: 0, last: null, t: new Map(), ok: new Set() }; hops.set(n, h); } return h; };
   const f1 = (v) => v == null ? "—" : v.toFixed(1);
   const lossCls = (l) => l >= 50 ? "bad" : l > 0 ? "warn" : "";
   return runLive({
-    url: "/api/trace/stream", body: { target, count: passes }, title: opts.title || "Route to " + target, fallback: opts.fallback,
+    url: "/api/trace/stream", body: { target, count: passes, max_hops: o.max_hops || 30, proto: o.proto || "icmp" }, title: opts.title || "Route to " + target, fallback: opts.fallback,
     onLine(line) {
       const p = line.split(" "), n = +p[1]; if (!/^[xhp]$/.test(p[0]) || isNaN(n)) return;
       const h = hop(n);
@@ -838,7 +1326,8 @@ function liveTrace(target, opts) {
 
 // ---- ports: open ports pop in as chips the moment nmap finds them, with a progress bar
 function livePorts(target, opts) {
-  opts = opts || {}; const open = new Map(), raw = []; let pct = 0;
+  opts = opts || {}; const o = opts.ports || { mode: "top100" }, open = new Map(), raw = []; let pct = 0;
+  const what = o.mode === "top1000" ? "the top 1000 ports" : o.mode === "range" ? "ports " + o.start + "–" + o.end : "the top 100 ports";
   const ordered = () => [...open].sort((a, b) => parseInt(a[0], 10) - parseInt(b[0], 10));
   const report = () => {   // the useful part of nmap's output: from the scan report to the "Nmap done" line (everything, if there was no report e.g. host not found)
     const i = raw.findIndex(l => /^Nmap scan report/.test(l)); if (i < 0) return raw.filter(l => l.trim()).join("\n");
@@ -846,7 +1335,7 @@ function livePorts(target, opts) {
     return raw.slice(i, j < 0 ? raw.length : j).concat(raw.filter(l => /^Nmap done/.test(l))).join("\n").replace(/\n{3,}/g, "\n\n").trim();
   };
   return runLive({
-    url: "/api/portscan/stream", body: { target }, title: opts.title || "Ports " + target, fallback: opts.fallback,
+    url: "/api/portscan/stream", body: Object.assign({ target }, o), title: opts.title || "Ports " + target, fallback: opts.fallback,
     onLine(line) {
       raw.push(line); let m;
       if ((m = line.match(/^Discovered open port (\d+\/\w+)/))) { if (!open.has(m[1])) open.set(m[1], ""); }
@@ -856,10 +1345,10 @@ function livePorts(target, opts) {
     },
     view(state, note) {
       const list = ordered(), n = list.length, live = state === "live";
-      const status = headOf(state, note) + " · " + (live ? "scanning top 100 ports" + (pct ? " · " + Math.round(pct) + "%" : "") + " · " + n + " open" : n ? n + " open port" + (n === 1 ? "" : "s") + " found" : "no open ports found");
+      const status = headOf(state, note) + " · " + (live ? "scanning " + what + (pct ? " · " + Math.round(pct) + "%" : "") + " · " + n + " open" : n ? n + " open port" + (n === 1 ? "" : "s") + " found" : "no open ports found");
       const chips = list.map(([k, svc]) => { const [pt, pr] = k.split("/"); return "<span class='chip'><b>" + esc(pt) + "</b>/" + esc(pr) + (svc ? "<i>" + esc(svc) + "</i>" : "") + "</span>"; }).join("");
       const html = (live ? "<div class='pbar'><i style='width:" + Math.max(3, Math.round(pct)) + "%'></i></div>" : "") +
-        "<div class='chips'>" + (chips || "<span class='res-wait'>" + (live ? "No open ports yet…" : "No open ports found in the top 100.") + "</span>") + "</div>";
+        "<div class='chips'>" + (chips || "<span class='res-wait'>" + (live ? "No open ports yet…" : "No open ports found in " + what + ".") + "</span>") + "</div>";
       return { status, text: live ? "" : report(), html, copy: live ? (n ? "Open so far: " + list.map(x => x[0]).join(", ") : "") : report() };
     }
   });
@@ -870,10 +1359,14 @@ $("btn-pingmon").onclick = () => {
   if (liveOn) { stopLive(); return; }
   const t = target(); if (!t) return;
   b.textContent = "Stop Ping Monitor";
-  livePing(t, 0, { title: "Ping Monitor " + t }).finally(() => { b.textContent = "Ping Monitor"; });
+  const o = topt("monitor");
+  livePing(t, 0, { title: "Ping Monitor " + t, ping: { interval: o.interval, size: o.size, df: o.df } }).finally(() => { b.textContent = "Ping Monitor"; });
 };
-$("btn-trace").onclick = () => { const t = target(); if (t) liveTrace(t, { fallback: () => tool("Traceroute " + t, "/api/mtr", { target: t }) }); };
-$("btn-portscan").onclick = () => { const t = target(); if (t) livePorts(t, { fallback: () => tool("Port Scan " + t, "/api/portscan", { target: t }) }); };
+$("btn-trace").onclick = () => { const t = target(); if (t) liveTrace(t, { route: topt("trace"), fallback: () => tool("Traceroute " + t, "/api/mtr", { target: t }) }); };
+$("btn-portscan").onclick = () => {
+  const t = target(), o = topt("ports"); if (!t) return;
+  if (o.mode === "range" && !(o.start >= 1 && o.start <= o.end && o.end <= 65535)) { show("Port range: pick a start and end between 1 and 65535 (start first)."); return; }
+  livePorts(t, { ports: o.mode === "range" ? { mode: "range", start: o.start, end: o.end } : { mode: o.mode }, fallback: () => tool("Port Scan " + t, "/api/portscan", { target: t }) }); };
 let devTimer = null, devPrev = null;
 $("btn-devwatch").onclick = async () => {
   const b = $("btn-devwatch");
@@ -946,15 +1439,125 @@ document.querySelectorAll("#sig-seg button").forEach(b => b.onclick = () => {
 window.addEventListener("resize", () => { if (pageShown("wifi")) drawSignalGraph(); });
 
 // ---------- tools tab: pick a tool, type a target, Start ----------
-const TOOL_BTN = { ping: "btn-ping", monitor: "btn-pingmon", trace: "btn-trace", ports: "btn-portscan", dns: "btn-dns", iperf: "btn-iperf" };
-const TOOL_HINTS = { ping: "Live ping — 10 probes, each reply appears as it arrives.", monitor: "Live continuous ping — every reply appears instantly until you tap Stop.", trace: "Live route — each hop fills in as it answers (10 passes). Tap Stop to end early.", ports: "Live port scan (top 100) — open ports pop in the moment they're found.", dns: "Look the name up (A / AAAA / reverse).", iperf: "LAN speed test against an iperf3 server at the target." };
+const TOOL_BTN = { ping: "btn-ping", monitor: "btn-pingmon", trace: "btn-trace", ports: "btn-portscan", dns: "btn-dns", whois: "btn-whois", iperf: "btn-iperf" };
+// per-tool options (remembered on this device): [key, label, [[value, text], ...]]
+const P_INT = ["interval", "Every", [[0.2, "0.2 s"], [0.5, "0.5 s"], [1, "1 s"], [2, "2 s"]]], P_SIZE = ["size", "Size", [[56, "56 B"], [512, "512 B"], [1472, "1472 B"]]],
+  P_DF = ["df", "Don't fragment", [[false, "Off"], [true, "On"]]];
+const TOPT_DEF = {
+  ping: [["count", "Count", [[5, "5"], [10, "10"], [20, "20"], [50, "50"], [100, "100"]]], P_INT, P_SIZE, P_DF],
+  monitor: [P_INT, P_SIZE, P_DF],
+  trace: [["passes", "Passes", [[5, "5"], [10, "10"], [20, "20"], [30, "30"]]], ["proto", "Protocol", [["icmp", "ICMP"], ["udp", "UDP"], ["tcp", "TCP 443"]]], ["max_hops", "Max hops", [[15, "15"], [30, "30"], [64, "64"]]]],
+  ports: [["mode", "Ports", [["top100", "Common 100"], ["top1000", "Top 1000"], ["range", "Range"]]]],
+  dns: [["type", "Record", ["ALL", "A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "PTR", "SRV", "CAA"].map(x => [x, x])],
+    ["server", "Server", [["", "System"], ["1.1.1.1", "Cloudflare"], ["8.8.8.8", "Google"], ["9.9.9.9", "Quad9"], ["custom", "Other…"]]]],
+};
+const TOPT_DEFAULT = { ping: { count: 10, interval: 1, size: 56, df: false }, monitor: { interval: 1, size: 56, df: false }, trace: { passes: 10, proto: "icmp", max_hops: 30 },
+  ports: { mode: "top100", start: 1, end: 1024 }, dns: { type: "ALL", server: "", custom: "" } };
+let toptStore = {}; try { toptStore = JSON.parse(localStorage.getItem("nt-topts") || "{}") || {}; } catch (e) {}
+function topt(tool) {
+  const o = Object.assign({}, TOPT_DEFAULT[tool] || {}, toptStore[tool] || {});
+  if (tool === "dns") o.dnsServer = o.server === "custom" ? (o.custom || "").trim() : o.server;
+  return o;
+}
+function setTopt(tool, k, v) { toptStore[tool] = Object.assign({}, toptStore[tool] || {}, { [k]: v }); try { localStorage.setItem("nt-topts", JSON.stringify(toptStore)); } catch (e) {} }
+function renderTopts() {
+  const box = $("tool-opts"), def = TOPT_DEF[toolSel], o = topt(toolSel);
+  if (!def) { box.innerHTML = ""; box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  let h = def.map(([k, label, vals]) => "<div class='topt'><span class='tl'>" + esc(label) + "</span><div class='pills'>" +
+    vals.map(([v, t], i) => "<button type='button' data-k='" + k + "' data-i='" + i + "' class='" + (o[k] === v ? "on" : "") + "'>" + esc(t) + "</button>").join("") + "</div></div>").join("");
+  if (toolSel === "ports" && o.mode === "range")
+    h += "<div class='topt'><span class='tl'>From</span><div class='pills nums'><input type='number' inputmode='numeric' min='1' max='65535' id='topt-start' value='" + o.start + "'><span class='muted'>to</span>" +
+      "<input type='number' inputmode='numeric' min='1' max='65535' id='topt-end' value='" + o.end + "'></div></div>";
+  if (toolSel === "dns" && o.server === "custom")
+    h += "<div class='topt'><span class='tl'>DNS server</span><div class='pills nums'><input type='text' id='topt-custom' placeholder='e.g. 192.168.1.1' autocapitalize='off' spellcheck='false' value='" + esc(o.custom || "") + "'></div></div>";
+  box.innerHTML = h;
+  box.querySelectorAll(".pills button").forEach(b => b.onclick = () => {
+    const k = b.dataset.k, v = def.find(d => d[0] === k)[2][+b.dataset.i][0]; setTopt(toolSel, k, v); renderTopts(); toolHint();
+    if (k === "server" && v === "custom") { const c = $("topt-custom"); if (c) c.focus(); }
+  });
+  [["topt-start", "start"], ["topt-end", "end"]].forEach(([id, k]) => { const el = $(id); if (el) el.oninput = () => { setTopt("ports", k, parseInt(el.value, 10) || 0); toolHint(); }; });
+  const c = $("topt-custom"); if (c) c.oninput = () => { setTopt("dns", "custom", c.value.trim()); toolHint(); };
+}
+function hintFor(t) {
+  const o = topt(t), pkt = (o.size || 56) + "-byte packets" + (o.df ? ", don't fragment" : ""), every = o.interval === 1 ? "every second" : "every " + o.interval + " s";
+  if (t === "ping") return "Live ping — " + o.count + " probes " + every + ", " + pkt + ".";
+  if (t === "monitor") return "Non-stop ping " + every + " (" + pkt + ") until you tap Stop.";
+  if (t === "trace") return "Live route — " + o.passes + " passes over " + (o.proto === "tcp" ? "TCP port 443 (gets through most firewalls)" : o.proto.toUpperCase()) + ", up to " + o.max_hops + " hops.";
+  if (t === "ports") return o.mode === "range" ? "Scan ports " + o.start + "–" + o.end + " — open ports pop in as they're found." : "Live port scan (" + (o.mode === "top1000" ? "top 1000, ~1 min" : "top 100") + ") — open ports pop in as they're found.";
+  if (t === "dns") return (o.type === "ALL" ? "All common records" : o.type + " records") + " via " + (o.dnsServer || "the system resolver") + ". An IP address gives its reverse name (PTR).";
+  if (t === "whois") return "Who owns a domain (registrar, dates, name servers) or an IP address (network, organisation, abuse contact).";
+  return "LAN speed test against an iperf3 server at the target.";
+}
 let toolSel = "ping";
 function startBtnLabel() { $("tool-start").textContent = liveOn ? "Stop" : "Start"; }
-function toolHint() { $("tool-hint").textContent = TOOL_HINTS[toolSel]; $("iperf-info").classList.toggle("hidden", toolSel !== "iperf"); startBtnLabel(); }
+function toolHint() { $("tool-hint").textContent = hintFor(toolSel); $("iperf-info").classList.toggle("hidden", toolSel !== "iperf"); startBtnLabel(); }
 function startTool() { if (liveOn) { stopLive(); return; } $(TOOL_BTN[toolSel]).click(); }
 document.querySelectorAll("#tool-seg button").forEach(b => b.onclick = () => {
-  toolSel = b.dataset.tool; document.querySelectorAll("#tool-seg button").forEach(x => x.classList.toggle("on", x === b)); toolHint();
+  toolSel = b.dataset.tool; document.querySelectorAll("#tool-seg button").forEach(x => x.classList.toggle("on", x === b)); renderTopts(); toolHint();
 });
+renderTopts();
+
+// rich (table / card) result in the page's result card; the copy text goes to Copy and to the console mode
+function showRich(title, status, html, copy, bad) {
+  if (outMode() === "dock") { show(copy); return; }
+  const el = reveal(outPage); plainCard(el); setTitle(el, title); setStatus(el, status, bad ? "" : "done");
+  const pre = el.querySelector(".res-out"); pre.textContent = ""; pre.classList.add("hidden");
+  const rich = el.querySelector(".res-rich"); rich.innerHTML = html; rich.classList.remove("hidden"); el.dataset.copy = copy;
+  ensureVisible(el);
+}
+const DNS_ORDER = ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "PTR", "SRV", "CAA"];
+async function dnsLookup(t) {
+  const o = topt("dns");
+  if (o.server === "custom" && !o.dnsServer) { show("Type the DNS server's IP in Tools > DNS > Other… first."); return; }
+  busy("DNS " + o.type + " " + t); let d;
+  try { d = await api("/api/dns/query", { target: t, type: o.type, server: o.dnsServer }); } catch (e) { busy(""); show(e.message); return; }
+  busy("");
+  if (d.error) { show(d.error); return; }
+  const rows = (d.rows || []).slice().sort((a, b) => DNS_ORDER.indexOf(a.type) - DNS_ORDER.indexOf(b.type)), res = d.results || [];
+  const ms = res.map(r => r.ms).filter(v => v != null), failed = res.filter(r => r.status !== "NOERROR");
+  const nx = res.some(r => r.status === "NXDOMAIN"), timeout = res.length && res.every(r => r.status === "TIMEOUT");
+  const badge = (r) => { const n = r.rows.length, cls = r.status === "NOERROR" ? (n ? "ok" : "none") : "bad";
+    return "<span class='dchip " + cls + "'><b>" + esc(r.type) + "</b>" + (r.status === "NOERROR" ? (n ? n : "none") : esc(r.status)) + "</span>"; };
+  const status = (timeout ? "⚠ No answer from " + esc(d.server) : nx ? "⚠ " + t + " does not exist (NXDOMAIN)" : "✔ " + rows.length + " record" + (rows.length === 1 ? "" : "s")) +
+    " · via " + d.server + (ms.length ? " · " + Math.max(...ms) + " ms" : "");
+  const html = "<div class='dchips'>" + res.map(badge).join("") + "</div>" +
+    (rows.length ? "<table class='dns'><thead><tr><th>Type</th><th>Value</th><th>TTL</th></tr></thead><tbody>" +
+      rows.map(r => "<tr><td class='t'>" + esc(r.type) + "</td><td class='v'>" + esc(r.value) + (r.name.toLowerCase() !== t.toLowerCase().replace(/\.$/, "") && r.type !== "PTR" ? "<small>" + esc(r.name) + "</small>" : "") +
+        "</td><td class='ttl'>" + (r.ttl != null ? fmtTtl(r.ttl) : "") + "</td></tr>").join("") + "</tbody></table>"
+      : "<div class='res-wait'>" + (timeout ? "The DNS server didn't answer — try another server." : nx ? "That name isn't registered / doesn't exist." : "No " + (o.type === "ALL" ? "" : o.type + " ") + "records for this name.") + "</div>") +
+    "<div class='res-foot'>Server " + esc(d.server) + (ms.length ? " · slowest answer " + Math.max(...ms) + " ms" : "") + (failed.length && !nx && !timeout ? " · " + failed.map(r => r.type + " " + r.status).join(", ") : "") + "</div>";
+  const copy = "DNS " + d.type + " " + t + " via " + d.server + "\n" + (rows.map(r => r.type.padEnd(6) + String(r.ttl ?? "").padStart(7) + "  " + r.value).join("\n") || "no records");
+  showRich("DNS " + t, status, html, copy, nx || timeout);
+}
+function fmtTtl(s) { return s < 120 ? s + "s" : s < 7200 ? Math.round(s / 60) + "m" : s < 172800 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d"; }
+async function whoisLookup(t) {
+  busy("Whois " + t); let d;
+  try { d = await api("/api/whois", { target: t }); } catch (e) { busy(""); show(e.message); return; }
+  busy("");
+  if (d.error) { show(d.error); return; }
+  const ev = d.events || {}, rows = [];
+  const add = (k, v) => { if (v != null && v !== "" && !(Array.isArray(v) && !v.length)) rows.push([k, v]); };
+  let expHtml = "";
+  if (ev.expiration) {
+    const days = Math.round((new Date(ev.expiration) - Date.now()) / 86400000);
+    expHtml = esc(ev.expiration) + " <span class='" + (days < 0 ? "nm-bad" : days < 30 ? "nm-warn" : "muted") + "'>(" + (days < 0 ? "expired " + -days + " days ago" : "in " + days + " days") + ")</span>";
+  }
+  if (d.kind === "domain") {
+    add("Registrar", esc(d.registrar)); add("Registrant", esc(d.registrant)); add("Registered", esc(ev.registration || ""));
+    add("Updated", esc(ev["last changed"] || "")); if (expHtml) rows.push(["Expires", expHtml]);
+    add("Name servers", (d.nameservers || []).map(esc).join("<br>")); add("DNSSEC", d.dnssec ? "<span class='nm-ok'>signed</span>" : "not signed");
+    add("Status", (d.status || []).map(esc).join("<br>")); add("Abuse", esc(d.abuse));
+  } else {
+    add("Network", esc(d.netname)); add("Organisation", esc(d.org)); add("Range", esc(d.range)); add("Country", esc(d.country)); add("Handle", esc(d.handle));
+    add("Registered", esc(ev.registration || "")); add("Updated", esc(ev["last changed"] || "")); add("Abuse", esc(d.abuse));
+  }
+  const html = "<div class='kv'>" + rows.map(([k, v]) => "<div class='dd-row'><span class='k'>" + k + "</span><span class='v'>" + v + "</span></div>").join("") + "</div>" +
+    "<div class='res-foot'>" + (/^rdap/.test(d.source || "rdap") ? "From RDAP (" + esc(d.source || "rdap.org") + ") — the modern whois." : "From the classic whois server " + esc(d.source) + " (this domain has no RDAP).") + "</div>";
+  const tmp = document.createElement("div");
+  const copy = "Whois " + t + "\n" + rows.map(([k, v]) => { tmp.innerHTML = String(v).replace(/<br>/g, ", "); return k.padEnd(14) + tmp.textContent; }).join("\n");
+  showRich("Whois " + t, "✔ " + (d.kind === "domain" ? (d.registrar || "registered") + (ev.expiration ? " · expires " + ev.expiration : "") : (d.org || d.netname || "IP network") + (d.country ? " · " + d.country : "")), html, copy);
+}
 $("tool-start").onclick = startTool;
 $("target").addEventListener("keydown", (e) => { if (e.key === "Enter") startTool(); });
 
@@ -1344,6 +1947,22 @@ function powerWaitBack() {
   };
   setTimeout(poll, 2000);
 }
+
+// ---------- show / hide password (an eye button in every password box) ----------
+document.querySelectorAll("input[type=password]").forEach(inp => {
+  const wrap = document.createElement("span"); wrap.className = "pw-wrap";
+  inp.parentNode.insertBefore(wrap, inp); wrap.appendChild(inp);
+  const eye = document.createElement("button"); eye.type = "button"; eye.className = "pw-eye"; eye.textContent = "Show";
+  eye.setAttribute("aria-label", "Show password"); eye.setAttribute("aria-pressed", "false");
+  eye.onclick = () => {
+    const show = inp.type === "password"; inp.type = show ? "text" : "password";
+    eye.textContent = show ? "Hide" : "Show"; eye.setAttribute("aria-pressed", String(show)); eye.setAttribute("aria-label", show ? "Hide password" : "Show password");
+    inp.focus();
+  };
+  wrap.appendChild(eye);
+  // hidden again whenever the box is emptied (after a join / save), so a password is never left on screen
+  inp.addEventListener("input", () => { if (!inp.value && inp.type === "text") eye.click(); });
+});
 
 // ---------- boot ----------
 $("dock-toggle").onclick = () => toggleDock();

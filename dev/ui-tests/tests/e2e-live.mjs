@@ -55,8 +55,8 @@ await page.waitForTimeout(3000);
 
 // 5) starting another tool while a monitor is live stops the monitor and takes over the card
 await page.locator("#tool-seg button[data-tool=monitor]").tap(); await page.locator("#tool-start").tap(); await page.waitForTimeout(800);
-await page.locator("#btn-bw").tap(); await page.waitForTimeout(900);
-ok((await page.locator("#res-tools .res-title").textContent()) === "Bandwidth", "takeover: card now shows Bandwidth");
+await page.evaluate(() => document.getElementById("btn-dns").click()); await page.waitForTimeout(900);
+ok((await page.locator("#res-tools .res-title").textContent()).startsWith("DNS "), "takeover: card now shows DNS");
 ok((await page.locator("#tool-start").textContent()) === "Start", "takeover: monitor was stopped");
 const txt = await page.locator("#res-tools .res-out").textContent(); await page.waitForTimeout(800);
 ok((await page.locator("#res-tools .res-out").textContent()) === txt && !txt.includes(" ttl "), "takeover: no ping lines leak into the new result");

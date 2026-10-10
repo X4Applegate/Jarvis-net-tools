@@ -32,18 +32,18 @@ ok((await page.locator("#sig-seg button.on").textContent()) === "6 GHz", "6 seg 
 // auto scan must not have popped the console open
 ok(await page.locator("#res-wifi:not(.hidden)").count() === 0, "auto-scan does not open a result card");
 await page.locator("#hdr-actions button").tap(); await page.waitForTimeout(1200);
-ok(await page.locator("#res-wifi:not(.hidden)").count() === 1, "manual Scan opens an on-page result card");
-ok((await page.locator("#res-wifi .res-out").textContent()).includes("Survey"), "survey text in card");
+ok(await page.locator("#res-wifi:not(.hidden)").count() === 0, "manual Scan does not open a text card either (graph + Join list only)");
+ok((await page.locator("#wifi-list option").count()) > 3 && !(await page.locator("#wifi-scan-btn").isDisabled()), "manual Scan refills the Join list");
 
 // tools: select tool, empty target warning, run ping + dns + monitor start/stop
 await page.locator('#tabs button[data-page=tools]').tap(); await page.waitForTimeout(400);
 await page.locator('#tool-seg button[data-tool="dns"]').tap();
-ok((await page.locator("#tool-hint").textContent()).includes("Look the name up"), "dns hint");
+ok((await page.locator("#tool-hint").textContent()).includes("All common records"), "dns hint");
 await page.locator("#tool-start").tap(); await page.waitForTimeout(300);
 ok((await page.locator("#res-tools .res-out").textContent()).includes("Enter a host"), "empty-target warning in card");
 await page.fill("#target", "google.com");
 await page.locator("#tool-start").tap(); await page.waitForTimeout(800);
-ok(calls.includes("POST /api/dns"), "dns call made: " + calls.slice(-4));
+ok(calls.includes("POST /api/dns/query"), "dns call made: " + calls.slice(-4));
 await page.locator('#tool-seg button[data-tool="ping"]').tap(); await page.locator("#hdr-actions button").tap(); await page.waitForTimeout(600);
 ok(calls.includes("POST /api/ping/stream"), "ping via header Start streams");
 await page.waitForTimeout(3000);   // let the 10-probe ping finish (while it runs, Start means Stop)
@@ -65,7 +65,8 @@ ok(calls.includes("POST /api/speedtest/stream"), "Test header runs the live spee
 
 // LAN scan + settings forms render
 await page.locator('#tabs button[data-page=network]').tap(); await page.locator("#hdr-actions button").tap(); await page.waitForTimeout(600);
-ok((await page.locator("#dev-list .item").count()) === 2, "device list rendered");
+await page.waitForTimeout(600);
+ok((await page.locator("#dev-list .dev-row").count()) === 4, "device list rendered");
 await page.locator('#tabs button[data-page=settings]').tap(); await page.waitForTimeout(500);
 ok((await page.locator("#set-devices .item").count()) === 2, "saved devices in settings");
 // lock button on Info

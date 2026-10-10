@@ -28,6 +28,11 @@ kill %1
 | `e2e-wizard` | Setup wizard: shows on the first start of a day only, company buttons + new company, Back, locations, visit saved after step 2, Wi-Fi list (saved / connected / locked), wrong then right password, saved network without password, Continue -> Info, Skip, Settings > Start New Visit, 800x480 and keyboard-up 800x283 |
 | `e2e-battery` | Info "Battery" row (Argon UPS): plugged in charging / full, on battery, low (amber + plug-in hint), critical (red), shutting down, no UPS = no row, escaping, 800x480 touch screen |
 | `e2e-finish` | Finish Visit: confirm (Cancel sends nothing), finished screen (Shut Down / View Report / Next Visit), in-app report viewer (styles contained, scrolls, Close), next start shows the wizard, Saved Reports open + delete with confirm, Shut Down = safe shutdown, 800x480 |
+| `e2e-share` | Share a saved report: USB (none -> plug in -> picked up by itself -> Save -> safe to unplug), email (not set up -> Settings form, SSL port, password kept, Send test -> To prefilled, send, bad address), viewer Share, Download only off the touch screen, 800x480 fit |
+| `e2e-scan` | Signal scan: big pulsing "Scanning nearby Wi-Fi…" banner over a dimmed graph, header + button show Scanning… and are disabled, 10 taps = 1 scan, back to normal after, 800x480 |
+| `e2e-tools` | Full-screen tool pages: Channel Analyzer (cards, BEST / YOU tags, crowding colours, band switch, tap for networks, Live / Pause / Close stops), Watch Roaming (current AP, AP list, roam log + count, sticky-client warning, signal trace, Close stops), show/hide password on every password box |
+| `e2e-lan` | LAN page: last scan on open, rows (name / IP with bold last part / vendor / ping / badges G W U B 6 P S), legend, search, Scanning card + one scan for many taps, Device Details (Actions / Device / Device Names, N/A), Wake on LAN, Save name, Ping jumps to Tools, 800x480 |
+| `e2e-pages` | Tool pages: Live Signal Meter (gauge, quality word, cards incl. min/avg/max, graph, every second, Close stops), Service / POS Check (grouped tiles, LAN finds, red summary + change log when a service drops) |
 
 `tests/live.mjs <url>` is a tiny smoke check of a *deployed* app (login screen renders, no JS errors).
 

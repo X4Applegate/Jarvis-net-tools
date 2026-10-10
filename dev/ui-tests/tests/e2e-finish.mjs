@@ -38,7 +38,7 @@ ok(/report is saved on the Pi, then the history is cleared/.test(asked) && /setu
 ok(sent.includes("POST /api/visit/finish"), "POST /api/visit/finish sent");
 ok(/✅ Visit finished/.test(await page.locator("#finish-title").textContent()) && /Report saved: Demo Coffee - Main St/.test(await page.locator("#finish-msg").textContent()), "finished screen names the saved report");
 const b = await page.$$eval("#finish-btns button", bs => bs.filter(x => x.offsetParent).map(x => [x.textContent, Math.round(x.getBoundingClientRect().height)]));
-ok(b.map(x => x[0]).join() === "Shut Down,View Report,Next Visit" && b.every(x => x[1] >= 48), "buttons: Shut Down / View Report / Next Visit, big: " + JSON.stringify(b));
+ok(b.map(x => x[0]).join() === "Shut Down,View Report,Share,Next Visit" && b.every(x => x[1] >= 48), "buttons: Shut Down / View Report / Share / Next Visit, big: " + JSON.stringify(b));
 await page.screenshot({ path: `${SHOTS}/finish-done.png` });
 ok((await reps(page))[0] === "Demo Coffee Main St", "the new report tops the Saved Reports list");
 
@@ -47,10 +47,12 @@ await page.locator("#finish-view").tap(); await settle(page, 600);
 const v = await page.evaluate(() => {
   const root = document.getElementById("report-body").shadowRoot, h1 = root && root.querySelector("h1");
   return { open: document.getElementById("report-dlg").open, h1: h1 && h1.textContent, red: h1 && getComputedStyle(h1).color,
-    appH1: getComputedStyle(document.getElementById("hdr-title")).color, scrolls: document.getElementById("report-body").scrollHeight > innerHeight };
+    appH1: getComputedStyle(document.getElementById("hdr-title")).color, scrolls: document.getElementById("report-body").scrollHeight > innerHeight,
+    text: root && getComputedStyle(root.querySelector("#who")).color, bg: root && getComputedStyle(root.querySelector(".rep-doc")).backgroundColor };
 });
 ok(v.open && v.h1 === "Site report" && v.red === "rgb(200, 0, 0)" && v.appH1 !== "rgb(200, 0, 0)", "report opens inside the app, its styles don't leak: " + JSON.stringify(v));
 ok(v.scrolls, "a long report scrolls inside the viewer");
+ok(v.text === "rgb(17, 17, 17)" && v.bg === "rgb(255, 255, 255)", "report text is dark on white (the report's body rule applies): " + v.text + " on " + v.bg);
 await page.screenshot({ path: `${SHOTS}/finish-report.png` });
 ok(await vis(page, "report-close"), "Close is visible on the touch screen");
 await page.locator("#report-close").tap(); await settle(page, 300);

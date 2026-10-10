@@ -122,7 +122,10 @@
         <div class="seg" id="sig-seg" role="tablist" aria-label="Graph band">
           <button data-b="2.4" class="on">2.4 GHz</button><button data-b="5">5 GHz</button><button data-b="6">6 GHz</button>
         </div>
-        <canvas id="sig-graph" class="chart tall"></canvas>
+        <div class="sig-wrap">
+          <canvas id="sig-graph" class="chart tall"></canvas>
+          <div id="sig-scanning" class="scan-banner hidden" role="status" aria-live="polite"><span class="spin"></span>Scanning nearby Wi-Fi… <span class="muted">a few seconds</span></div>
+        </div>
         <div id="sig-note" class="chart-note muted small">Scanning for networks…</div>
       </section>
       <section class="sect">
@@ -177,14 +180,29 @@
 
     <!-- ================= LAN ================= -->
     <main id="page-network" class="page hidden">
+      <section class="sect flush">
+        <div class="pad tight"><input type="search" id="lan-search" class="ul" placeholder="Search name, IP, vendor or MAC" autocomplete="off" spellcheck="false"></div>
+        <div class="lan-head"><span id="lan-net">This network</span><span id="lan-when" class="muted small"></span></div>
+        <div id="lan-scanning" class="lan-scanning hidden" role="status" aria-live="polite"><span class="spin"></span><div><b>Scanning this network…</b>
+          <div class="muted small">finding every device, its name, open ports and services (about 30 s)</div></div></div>
+        <div id="dev-list" class="devlist"></div>
+        <div id="lan-legend" class="lan-legend hidden">
+          <div class="lg-h">Legend</div>
+          <div class="lg-grid">
+            <span><i class="bd G">G</i> Gateway</span><span><i class="bd S">S</i> This Pi (scanning)</span>
+            <span><i class="bd W">W</i> Website available</span><span><i class="bd B">B</i> Bonjour available</span>
+            <span><i class="bd U">U</i> UPnP available</span><span><i class="bd v6">6</i> IPv6 available</span>
+            <span><i class="bd P">P</i> Pingable</span><span><span class="muted">ms</span> = ping time</span>
+          </div>
+        </div>
+      </section>
       <section class="sect">
         <h2 class="sect-h">Devices</h2>
         <div class="rows">
-          <button id="btn-devices2" class="rowbtn">Find &amp; Identify Devices</button>
+          <button id="btn-devices2" class="rowbtn">Scan for Devices</button>
           <button id="btn-devwatch" class="rowbtn">Device Watch</button>
           <a id="csv-link" class="rowbtn" href="/api/devices.csv">Export device list (CSV)</a>
         </div>
-        <div id="dev-list" class="devlist"></div>
       </section>
       <section class="sect">
         <h2 class="sect-h">Saved Devices</h2>
@@ -210,15 +228,16 @@
           <input type="text" id="target" class="ul" placeholder="Domain name / IP address" autocapitalize="off" autocorrect="off" spellcheck="false">
         </div>
         <div class="seg" id="tool-seg" role="tablist" aria-label="Tool">
-          <button data-tool="ping" class="on">Ping</button><button data-tool="monitor">Monitor</button><button data-tool="trace">Route</button><button data-tool="ports">Ports</button><button data-tool="dns">DNS</button><button data-tool="iperf">iPerf</button>
+          <button data-tool="ping" class="on">Ping</button><button data-tool="monitor">Monitor</button><button data-tool="trace">Route</button><button data-tool="ports">Ports</button><button data-tool="dns">DNS</button><button data-tool="whois">Whois</button><button data-tool="iperf">iPerf</button>
         </div>
+        <div id="tool-opts" class="topts"></div>
         <div id="tool-hint" class="chart-note muted small"></div>
         <div id="iperf-info" class="chart-note muted small hidden"></div>
         <div class="pad"><button id="tool-start" class="block">Start</button></div>
         <!-- the original per-tool buttons stay in the DOM (hidden): the segmented control + Start drive them -->
         <div class="hidden">
           <button id="btn-ping"></button><button id="btn-portscan"></button><button id="btn-dns"></button>
-          <button id="btn-trace"></button><button id="btn-pingmon"></button><button id="btn-iperf"></button>
+          <button id="btn-trace"></button><button id="btn-pingmon"></button><button id="btn-iperf"></button><button id="btn-whois"></button>
         </div>
       </section>
       <section class="sect">
@@ -364,6 +383,22 @@
         <div class="pad tight"><p class="muted small">Finish Visit saves the site report here before it clears the history. Reports stay on the Pi until you delete them.</p></div>
       </section>
       <section class="sect">
+        <h2 class="sect-h">Email Reports <span id="mail-state" class="sect-note"></span></h2>
+        <div class="pad">
+          <input type="text" id="mail-host" placeholder="Mail server (SMTP), e.g. mail.example.com" autocomplete="off">
+          <div class="row-inline">
+            <select id="mail-sec"><option value="starttls">STARTTLS (port 587)</option><option value="ssl">SSL/TLS (port 465)</option></select>
+            <input type="number" id="mail-port" class="mail-port" placeholder="Port" min="1" max="65535">
+          </div>
+          <input type="text" id="mail-user" placeholder="Username (usually the full email address)" autocomplete="off">
+          <input type="password" id="mail-pass" placeholder="Password" autocomplete="new-password">
+          <input type="text" id="mail-from" placeholder="From address" autocomplete="off">
+          <input type="text" id="mail-to" placeholder="Send reports to (addresses, separated by commas)" autocomplete="off">
+          <div class="btnrow"><button id="mail-save" class="wz-grow">Save</button><button id="mail-test" class="util narrow">Send test</button></div>
+          <p class="muted small">The password is kept on this Pi only and never shown again. Leave it empty to keep the saved one.</p>
+        </div>
+      </section>
+      <section class="sect">
         <h2 class="sect-h">Power</h2>
         <div class="rows"><button id="btn-shutdown" class="rowbtn danger-text">Shut Down Pi (safe)</button></div>
       </section>
@@ -403,19 +438,51 @@
         <div id="finish-btns" class="hidden">
           <button id="finish-off" class="danger">Shut Down</button>
           <button id="finish-view" class="util">View Report</button>
+          <button id="finish-share" class="util">Share</button>
           <button id="finish-next" class="util">Next Visit</button>
         </div>
       </div>
+    </dialog>
+
+    <!-- full-screen tool page: one per tool (Channel Analyzer, Watch Roaming, …), live while open -->
+    <dialog id="tv" aria-labelledby="tv-title">
+      <div class="tv-bar">
+        <div class="tv-head"><div id="tv-title" class="tv-title"></div><div id="tv-live" class="tv-live"></div></div>
+        <button id="tv-refresh" class="mini">Refresh</button>
+        <button id="tv-close" class="mini">Close</button>
+      </div>
+      <div id="tv-body" class="tv-body"></div>
     </dialog>
 
     <!-- saved report viewer (inside the app: the touch screen has no window bar to close a new window) -->
     <dialog id="report-dlg" aria-labelledby="report-title">
       <div class="rep-bar">
         <span id="report-title" class="rep-title"></span>
-        <a id="report-dl" class="rep-dl" href="#">Download</a>
+        <button id="report-share" class="mini">Share</button>
         <button id="report-close" class="mini">Close</button>
       </div>
       <div id="report-body" class="rep-body"></div>
+    </dialog>
+
+    <!-- Share a saved report: USB stick / email / download (only what is available right now is enabled) -->
+    <dialog id="share-dlg" aria-labelledby="share-title">
+      <div class="dlg-body">
+        <h2 id="share-title">Share report</h2>
+        <p id="share-what" class="muted small"></p>
+        <div class="share-opt" id="share-usb">
+          <div class="so-h"><span>💾 Save to USB stick</span><button id="share-usb-go" class="mini">Save</button></div>
+          <div id="share-usb-st" class="so-st muted small"></div>
+        </div>
+        <div class="share-opt" id="share-mail">
+          <div class="so-h"><span>✉️ Email as PDF</span><button id="share-mail-go" class="mini">Send</button></div>
+          <input type="text" id="share-mail-to" placeholder="To: name@example.com, …" autocomplete="off">
+          <div id="share-mail-st" class="so-st muted small"></div>
+        </div>
+        <div class="share-opt" id="share-dl">
+          <div class="so-h"><span>⬇️ Download</span><span><a id="share-dl-pdf" class="so-link" href="#">PDF</a> · <a id="share-dl-html" class="so-link" href="#">HTML</a></span></div>
+        </div>
+        <button id="share-close" class="util block">Close</button>
+      </div>
     </dialog>
 
     <!-- bottom tab bar -->

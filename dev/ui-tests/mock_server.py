@@ -17,11 +17,30 @@ class H(SimpleHTTPRequestHandler):
     visit={"date":time.strftime("%Y-%m-%d"),"company":"Demo Coffee","location":"Main St","ts":NOW-3600}   # today's visit already done
     companies=[{"name":"Demo Coffee","locations":["Main St","Airport"]},{"name":"Example Tea","locations":["Harbor"]}]
     reports=[{"name":"2026-10-01_0930_Example-Tea-Harbor.html","ts":NOW-7*86400,"size":9000,"site":"Example Tea Harbor"}]
+    usb=[]       # USB sticks the Pi sees (tests set this through page.route; default none)
+    mail={"host":"","port":587,"security":"starttls","user":"","from":"","to":[],"password_set":False,"ready":False}
+    saved=[{"name":"Office PC","mac":"AA:BB:CC:DD:EE:01","ip":"192.168.88.50"},{"name":"Store NVR","mac":"AA:BB:CC:DD:EE:02","ip":""}]
+    def path_body(self):
+        try: b=json.loads(getattr(self,"body",b"") or b"{}"); return b if isinstance(b,dict) else {}
+        except Exception: return {}
     def log_message(self,*a): pass
     def hotspot(self):
         return {"mode":H.hs_mode,"service":True,"ssid":"JarvisPi-Manage","active":H.hs_mode=="on","clients":0,"online":True,"fallback_in":None,"error":"","note":""}
     def do_API(self,method):
         path=self.path.split("?")[0]
+        if path=="/api/usb": return jr({"drives":H.usb})
+        if path=="/api/mail":
+            if method=="POST":
+                try: b=json.loads(getattr(self,"body",b"") or b"{}")
+                except Exception: b={}
+                to=[x.strip() for x in str(b.get("to","")).split(",") if x.strip()]
+                H.mail=dict(H.mail,host=b.get("host",""),port=int(b.get("port") or 587),security=b.get("security","starttls"),user=b.get("user",""),
+                            to=to,password_set=H.mail["password_set"] or bool(b.get("password")))
+                H.mail["from"]=b.get("from",""); H.mail["ready"]=bool(H.mail["host"] and H.mail["from"] and H.mail["password_set"])
+                return jr({"ok":True,**H.mail})
+            return jr(H.mail)
+        if path=="/api/mail/test" and method=="POST":
+            return jr({"ok":True,"to":H.mail["to"] or [H.mail["from"]]}) if H.mail["ready"] else jr({"error":"fill in the server, From address and password first"},400)
         if path=="/api/visit/finish" and method=="POST":
             site=(H.visit.get("company","") + (" - "+H.visit["location"] if H.visit.get("location") else "")) or "site"
             import re as _re; slug=_re.sub(r"[^A-Za-z0-9._]+","-",site).strip("-.")
@@ -29,6 +48,26 @@ class H(SimpleHTTPRequestHandler):
             H.reports=[{"name":name,"ts":int(time.time()),"size":12000,"site":slug.replace("-"," ")}]+[r for r in H.reports if r["name"]!=name]
             H.visit=dict(H.visit,finished=True,report=name); H.hist_since={"ts":int(time.time()),"reason":"finished"}
             return jr({"ok":True,"report":name,"site":site})
+        if path=="/api/dns/query" and method=="POST":
+            b=self.path_body(); t=b.get("target",""); ty=b.get("type","ALL"); srv=b.get("server") or "127.0.0.53"
+            if t=="nope.invalid": return jr({"name":t,"type":ty,"server":srv,"results":[{"type":"A","status":"NXDOMAIN","ms":9,"server":srv,"rows":[]}],"rows":[]})
+            recs={"A":[("192.0.2.14",300)],"AAAA":[("2001:db8::14",300)],"CNAME":[],"MX":[("10 mail.example.com.",3600)],
+                  "NS":[("a.iana-servers.net.",86400),("b.iana-servers.net.",86400)],"TXT":[('"v=spf1 -all"',3600)],"SOA":[("ns.icann.org. noc.dns.icann.org. 2024081455 7200 3600 1209600 3600",3600)],"CAA":[]}
+            types=["PTR"] if t[:1].isdigit() else (list(recs) if ty=="ALL" else [ty])
+            res=[]
+            for q in types:
+                vals=[("dns.example.",3600)] if q=="PTR" else recs.get(q,[])
+                res.append({"type":q,"status":"NOERROR","ms":12,"server":srv,"rows":[{"name":t,"ttl":v[1],"type":q,"value":v[0]} for v in vals]})
+            return jr({"name":t,"type":ty,"server":srv,"results":res,"rows":[r for x in res for r in x["rows"]]})
+        if path=="/api/whois" and method=="POST":
+            t=self.path_body().get("target","")
+            if t=="nope.invalid": return jr({"error":"nope.invalid: not found"},404)
+            if t[:1].isdigit():
+                return jr({"kind":"ip","name":t,"handle":"NET-198-51-100-0-1","status":["active"],"events":{"registration":"2014-03-14","last changed":"2024-01-02"},"registrar":"","registrant":"",
+                           "abuse":"abuse@example.net","nameservers":[],"dnssec":False,"range":"198.51.100.0 - 198.51.100.255","netname":"EXAMPLE-NET","country":"US","org":"Example Networks LLC","source":"rdap.org"})
+            return jr({"kind":"domain","name":t,"handle":"2336799_DOMAIN_COM-VRSN","status":["client delete prohibited","client transfer prohibited"],
+                       "events":{"registration":"1995-08-14","last changed":"2026-08-14","expiration":"2027-08-13"},"registrar":"Example Registrar, Inc.","registrant":"",
+                       "abuse":"abuse@registrar.example","nameservers":["a.iana-servers.net","b.iana-servers.net"],"dnssec":True,"range":"","netname":"","country":"","org":"","source":"rdap.org"})
         if path=="/api/reports": return jr({"reports":H.reports})
         if path=="/api/reports/delete" and method=="POST":
             try: n=json.loads(getattr(self,"body",b"") or b"{}").get("name")
@@ -38,7 +77,7 @@ class H(SimpleHTTPRequestHandler):
         if path.startswith("/api/reports/"):
             n=path[len("/api/reports/"):]
             if not any(r["name"]==n for r in H.reports): return jr({"error":"no such report"},404)
-            return 200, ("<!doctype html><html><head><style>h1{color:rgb(200,0,0)} body{margin:24px}</style></head><body><h1>Site report</h1><p id=\"who\">"+n+"</p>"+"<p>line</p>"*80+"</body></html>").encode()
+            return 200, ("<!doctype html><html><head><style>body{margin:24px;color:#111} h1{color:rgb(200,0,0)}</style></head><body><h1>Site report</h1><p id=\"who\">"+n+"</p>"+"<p>line</p>"*80+"</body></html>").encode()
         if path=="/api/visit":
             if method=="POST":
                 try: b=json.loads(getattr(self,"body",b"") or b"{}")
@@ -84,19 +123,81 @@ class H(SimpleHTTPRequestHandler):
                 d=random.choice([718,392,331,150,640,720,455]); rows.append({"ts":NOW-(20-i)*3600*3,"down":d,"up":round(d*random.uniform(.4,.9)),"ping":random.randint(12,30),"grade":random.choice("ABBCD"),"source":"auto","server":"Seattle"})
             return jr({"rows":rows})
         if path=="/api/settings":
+            if method=="POST" and "saved_devices" in self.path_body():          # remember saved devices (the Pi does)
+                H.saved=self.path_body()["saved_devices"]
             return jr({"ok":True,"site_name":"Demo site","speed_interval_min":60,"service_checks":[{"name":"Online ordering","type":"https","target":"https://shop.example.com"}],
-                       "saved_devices":[{"name":"Office PC","mac":"AA:BB:CC:DD:EE:01","ip":"192.168.88.50"},{"name":"Store NVR","mac":"AA:BB:CC:DD:EE:02","ip":""}],"version":"3.0","hostname":"jarvis-pi","ipinfo_token_set":True,
+                       "saved_devices":H.saved,"version":"3.0","hostname":"jarvis-pi","ipinfo_token_set":True,
                        "history_since":H.hist_since})
         if path=="/api/scanall":
             return jr({"networks":[{"ch":str(c),"sig":str(s),"ssid":n,"band":("%g"%b),"freq":band_freq(b,c)} for n,b,c,s in NETS]})
         if path=="/api/wifi/saved": return jr({"profiles":["Example WiFi","ShopNet-Admin","Backup-2.4GHz","Home WiFi"]})
-        if path=="/api/aps": return jr({"ssid":"Example WiFi","aps":[{"bssid":"02:00:5E:00:00:01","signal":86,"band":"5","ch":149,"current":True},{"bssid":"02:00:5E:00:00:02","signal":44,"band":"5","ch":36,"current":False}]})
+        if path=="/api/services":
+            H.svc_n=getattr(H,"svc_n",0)+1
+            res=[{"name":"Gateway","type":"gw","group":"Network","target":"192.168.88.1","ok":True,"detail":"1.8 ms"},
+                 {"name":"Internet (1.1.1.1)","type":"ping","group":"Network","target":"1.1.1.1","ok":True,"detail":"14.2 ms"},
+                 {"name":"DNS resolve (google.com)","type":"dns","group":"Network","target":"google.com","ok":True,"detail":"192.0.2.80 (22 ms)"},
+                 {"name":"Square POS","type":"https","group":"Payments","target":"https://squareup.com","ok":True,"detail":"HTTP 200 in 210 ms"},
+                 {"name":"Toast POS","type":"https","group":"Payments","target":"https://pos.toasttab.com","ok":H.svc_n%2==1,"detail":"HTTP 200 in 640 ms" if H.svc_n%2==1 else "unreachable / timeout"},
+                 {"name":"Spotify","type":"https","group":"Apps","target":"https://api.spotify.com","ok":True,"detail":"HTTP 401 in 95 ms"},
+                 {"name":"Online ordering","type":"https","group":"Your checks","target":"https://shop.example.com","ok":True,"detail":"HTTP 200 in 330 ms"}]
+            return jr({"output":"(mock)","results":res,"failed":sum(1 for r in res if not r["ok"]),"lan":{"subnet":"192.168.88.0/24","found":{"Omada controller":["192.168.88.5"],"Receipt / label printer":[],"IPP printer":["192.168.88.77"]}}})
+        if path=="/api/channel":
+            bands={"2.4":{},"5":{},"6":{}}
+            for n,b,c,s in NETS:
+                e=bands["%g"%b].setdefault(str(c),{"count":0,"best":0,"ssids":[]}); e["count"]+=1; e["best"]=max(e["best"],s); e["ssids"].append({"ssid":n,"sig":s})
+            return jr({"band24":bands["2.4"],"band5":bands["5"],"band6":bands["6"]})
+        if path=="/api/aps": return jr({"ssid":"Example WiFi","aps":[{"bssid":"02:00:5E:00:00:01","signal":86,"band":"5","ch":149,"current":True,"name":"Office AP"},
+                                       {"bssid":"02:00:5E:00:00:04","signal":70,"band":"2.4","ch":6,"current":False,"name":""},
+                                       {"bssid":"02:00:5E:00:00:02","signal":44,"band":"5","ch":36,"current":False,"name":"Back Room"}]})
+        if path=="/api/pubip": return jr({"output":"{}","info":{"ip":"203.0.113.45","hostname":"203-0-113-45.example-isp.net","isp":"Example ISP","asn":"AS64500","domain":"example-isp.net",
+                                       "city":"Metro","region":"State","country":"US","country_name":"","timezone":"America/Los_Angeles"},"ipv6":"2001:db8:1::45"})
+        if path=="/api/dnscheck":
+            names=["google.com","cloudflare.com","microsoft.com","squareup.com"]
+            def row(label,srv,mine,ms): return {"label":label,"server":srv,"mine":mine,"avg":round(sum(ms)/len(ms)),"min":min(ms),"max":max(ms),"ok":4,"fail":0,
+                                                 "results":[{"name":n,"status":"NOERROR","ms":m,"answers":1} for n,m in zip(names,ms)]}
+            return jr({"output":"(mock)","resolvers":["192.168.88.1"],"names":names,"hijack":False,"nx_status":"NXDOMAIN",
+                       "rows":[row("This network","192.168.88.1",True,[12,18,25,9]),row("Cloudflare","1.1.1.1",False,[14,11,16,13]),row("Google","8.8.8.8",False,[22,19,28,21]),row("Quad9","9.9.9.9",False,[30,26,41,33])]})
+        if path=="/api/dhcp":
+            o=lambda s,r: {"server":s,"offered":"192.168.88.150","router":r,"dns":"192.168.88.1","mask":"255.255.255.0","lease":"2h00m00s","domain":"lan"}
+            return jr({"output":"(mock)","servers":["192.168.88.1","192.168.0.1"],"rogue":True,"iface":"wlan1","gateway":"192.168.88.1","offers":[o("192.168.88.1","192.168.88.1"),o("192.168.0.1","192.168.0.1")]})
+        if path=="/api/jack/link": return jr({"iface":"eth0","link":True,"speed":"1000","duplex":"full"})
+        if path=="/api/jack":
+            return jr({"output":"(mock)","iface":"eth0","link":True,"speed":"1000","ip":"192.168.88.61","checks":[
+                {"k":"link","state":"ok","title":"Link up \u00b7 1000 Mb/s full","detail":""},
+                {"k":"dhcp","state":"ok","title":"Got an address \u00b7 192.168.88.61","detail":"gateway 192.168.88.1 \u00b7 DNS 192.168.88.1"},
+                {"k":"switch","state":"ok","title":"Switch Core-SW \u00b7 port gi1/0/12","detail":"Front desk"},
+                {"k":"vlan","state":"ok","title":"No VLAN tags","detail":"an access port: normal for a device jack"},
+                {"k":"internet","state":"ok","title":"Internet through this jack \u00b7 14 ms","detail":""}]})
+        if path=="/api/ports":
+            L=lambda pr,po,a,proc,sc: {"proto":pr,"port":po,"addr":a,"iface":"","process":proc,"scope":sc}
+            return jr({"output":"(mock)","listeners":[L("tcp",22,"0.0.0.0","sshd","all"),L("tcp",5201,"*","iperf3","all"),L("tcp",8092,"203.0.113.15","python3","one"),
+                       L("udp",5353,"0.0.0.0","avahi-daemon","all"),L("tcp",8092,"127.0.0.1","python3","local"),L("tcp",8088,"127.0.0.1","influxd","local"),L("udp",46169,"0.0.0.0","speedtest","all")]})
+        if path=="/api/bandwidth/now":
+            H.bw_n=getattr(H,"bw_n",0)+1; t=time.time(); k=H.bw_n
+            return jr({"ts":t,"default":"wlan1","ifaces":{"wlan1":{"rx":k*k*2500000,"tx":k*k*600000},"eth0":{"rx":0,"tx":0},"wg1":{"rx":5000+k*1000,"tx":2000+k*500}}})
+        if path=="/api/history":
+            E=[{"ts":"2026-10-10 09:42:11","label":"Whois","target":"example.com","text":"registrar: Example Registrar, Inc."},
+               {"ts":"2026-10-10 09:40:02","label":"DNS MX","target":"example.com","text":"MX   3600  10 mail.example.com."},
+               {"ts":"2026-10-10 09:31:47","label":"Ping (live)","target":"1.1.1.1","text":"10 packets transmitted, 10 received, 0% packet loss"},
+               {"ts":"2026-10-10 09:20:05","label":"Ping (live)","target":"192.168.88.1","text":"10 packets transmitted, 9 received, 10% packet loss"},
+               {"ts":"2026-10-10 09:05:33","label":"Rogue DHCP check","target":"wlan1","text":"OK \u2014 exactly one DHCP server: 192.168.88.1"}]
+            return jr({"output":"(mock history)","entries":E})
         if path=="/api/apnames": return jr({"names":{"02:00:5E:00:00:01":"Office AP"}})
         if path=="/api/iperf/info": return jr({"server":True,"ips":["192.168.88.34"]})
         if path=="/api/shutdown": return jr({"ok":True,"action":"shutdown","power_button":True})   # mock: nothing powers off
         if path=="/api/history/clear" and method=="POST":
             H.hist_since={"ts":int(time.time()),"reason":"manual"}; return jr({"ok":True,"history_since":H.hist_since})
-        if path=="/api/devices": return jr({"hosts":[{"ip":"192.168.88.1","name":"Omada Gateway","type":"Router","vendor":"TP-Link","mac":"02:00:5E:00:00:03","info":""},{"ip":"192.168.88.50","name":"Office PC","type":"Laptop","vendor":"Intel Corporate","mac":"AA:BB:CC:DD:EE:01","info":""}]})
+        if path in ("/api/devices","/api/devices/last"):
+            hosts=[{"ip":"192.168.88.1","name":"Omada Gateway","type":"Router","vendor":"TP-Link","mac":"02:00:5E:00:00:03","info":"","ping":1.2,"ports":["22","80","443"],
+                    "web":"https://192.168.88.1","title":"Omada Gateway","ipv6":[],"services":[],"upnp":{"friendly":"Omada Gateway","manufacturer":"TP-Link","model":"ER605"},
+                    "names":{"mdns":"","netbios":"","dns":"router.lan"},"flags":["G","W","U","P"]},
+                   {"ip":"192.168.88.34","name":"jarvis-pi","type":"","vendor":"Jarvis Net Tools (this Pi)","mac":"AA:BB:CC:DD:EE:34","info":"","ping":0.1,"ports":[],"web":"","title":"",
+                    "ipv6":["2001:db8::34"],"services":["ssh"],"upnp":{},"names":{"mdns":"jarvis-pi.local","netbios":"","dns":""},"flags":["B","6","P","S"],"self":True},
+                   {"ip":"192.168.88.50","name":"Office PC","type":"Laptop","vendor":"Intel Corporate","mac":"AA:BB:CC:DD:EE:01","info":"","ping":3.4,"ports":["445"],"web":"","title":"",
+                    "ipv6":[],"services":[],"upnp":{},"names":{"mdns":"","netbios":"OFFICE-PC","dns":""},"flags":["P"]},
+                   {"ip":"192.168.88.77","name":"","type":"Printer","vendor":"HP","mac":"AA:BB:CC:DD:EE:77","info":"","ping":None,"ports":["631","9100"],"web":"","title":"",
+                    "ipv6":[],"services":["ipp","printer"],"upnp":{},"names":{"mdns":"","netbios":"","dns":""},"flags":["B"]}]
+            return jr({"hosts":hosts,"network":"Example WiFi","gw":"192.168.88.1","ts":NOW-120})
         return jr({"ok":True,"output":"(mock) %s %s\nPING 1.1.1.1: 5 packets transmitted, 5 received, 0%% packet loss\nrtt min/avg/max = 14.2/17.9/22.0 ms"%(method,path)})
     def _send(self,code,body,ct="application/json"):
         self.send_response(code); self.send_header("Content-Type",ct); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(body)

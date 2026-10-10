@@ -17,10 +17,12 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import socket
 import sys
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -681,7 +683,20 @@ def devices():
     # first. arp-scan resolves vendor names from a file relative to its cwd.
     hosts = scan_devices()
     log_history("Find Devices", None, "\n".join(f"{h['ip']:<16}{h['name'][:24]:<26}{h['type'][:26]:<28}{h['vendor'][:24]:<26}{h['mac']}" for h in hosts))
-    return jsonify({"hosts": hosts})
+    return jsonify({"hosts": hosts, **lan_meta()})
+
+
+def lan_meta():
+    iface = default_iface()
+    return {"network": active_ssid() or ("Ethernet (" + iface + ")" if iface.startswith(("eth", "en")) else iface),
+            "gw": default_gw(), "ts": int(_last_devices_ts) if _last_devices_ts else None}
+
+
+@app.get("/api/devices/last")
+@require_login
+def devices_last():
+    """The last scan of today's visit (no new scan): the LAN page shows it straight away."""
+    return jsonify({"hosts": cached_devices(), **lan_meta()})
 
 
 _last_devices = []
@@ -694,22 +709,42 @@ def cached_devices():
     return _last_devices if _last_devices and (not h or _last_devices_ts >= h["ts"]) else []
 
 
-def resolve_name(ip):
-    """Best-effort device name: mDNS (.local) -> NetBIOS -> reverse DNS."""
+def resolve_names(ip):
+    """Every name source on its own (the device page shows them all): mDNS, NetBIOS, reverse DNS."""
+    names = {"mdns": "", "netbios": "", "dns": ""}
     out = run(["avahi-resolve-address", ip], timeout=3)
     if "\t" in out:
-        n = out.split("\t")[1].strip()
-        if n:
-            return n
-    out = run(["nbtscan", "-q", "-t", "800", ip], timeout=4)
-    for line in out.splitlines():
+        names["mdns"] = out.split("\t")[1].strip()
+    for line in run(["nbtscan", "-q", "-t", "800", ip], timeout=4).splitlines():
         p = line.split()
         if len(p) >= 2 and p[0] == ip and p[1] not in ("<unknown>",):
-            return p[1]
+            names["netbios"] = p[1]
+            break
     out = run(["dig", "+short", "+time=1", "+tries=1", "-x", ip], timeout=3).strip()
     if out and "timed out" not in out and ";" not in out:
-        return out.splitlines()[0].rstrip(".")
-    return ""
+        names["dns"] = out.splitlines()[0].rstrip(".")
+    return names
+
+
+def ping_ms(ip):
+    """One ICMP echo: round-trip ms, or None (no reply in 1 s - many phones and PCs ignore ping)."""
+    m = re.search(r"time[=<]([\d.]+) ?ms", run(["ping", "-c", "1", "-W", "1", "-n", ip], timeout=3))
+    return round(float(m.group(1)), 1) if m else None
+
+
+def ipv6_by_mac(iface):
+    """MAC -> IPv6 addresses on this LAN. One ping to the all-nodes address ff02::1 makes every IPv6 device answer
+    (that is how it gets into the neighbour table); global addresses first, then link-local fe80::."""
+    run(["ping", "-6", "-c", "2", "-i", "1", "-w", "3", "-n", "ff02::1%" + iface], timeout=6)   # (non-root: >= 1 s apart)
+    found = {}
+    for line in run(["ip", "-6", "neigh", "show", "dev", iface]).splitlines():
+        m = re.match(r"^([0-9a-f:]+) lladdr ([0-9a-f:]{17})", line)
+        if m and "FAILED" not in line:
+            found.setdefault(m.group(2), []).append(m.group(1))
+    return {mac: sorted(a, key=lambda x: (x.startswith("fe80"), x)) for mac, a in found.items()}
+
+
+WEB_PORTS = (("443", "https"), ("80", "http"), ("8443", "https"), ("8080", "http"), ("8043", "https"), ("5000", "http"))
 
 
 OUI_CACHE = "/var/lib/jarvis-nettools/oui-cache.json"
@@ -858,15 +893,26 @@ def scan_devices():
     if not hosts:
         _last_devices, _last_devices_ts = hosts, time.time()
         return hosts
+    if local_ip and local_ip not in seen:                       # the Pi itself (arp-scan never lists the scanning host)
+        try:
+            with open(f"/sys/class/net/{iface}/address") as f:
+                my_mac = f.read().strip()
+        except OSError:
+            my_mac = ""
+        hosts.append({"ip": local_ip, "mac": my_mac, "vendor": "Jarvis Net Tools (this Pi)", "name": "", "type": "", "info": "", "self": True})
     ips = [h["ip"] for h in hosts]
     unknown_macs = [h["mac"] for h in hosts if "unknown" in h["vendor"].lower() and "locally administered" not in h["vendor"].lower()]
     with ThreadPoolExecutor(max_workers=24) as ex:
-        f_names = [ex.submit(resolve_name, ip) for ip in ips]
+        f_names = [ex.submit(resolve_names, ip) for ip in ips]
+        f_ping = [ex.submit(ping_ms, ip) for ip in ips]
+        f_v6 = ex.submit(ipv6_by_mac, iface)
         f_mdns = ex.submit(mdns_browse)
         f_ssdp = ex.submit(ssdp_discover, local_ip) if local_ip else None
         f_ports = ex.submit(run, ["sudo", PRIV, "nmap", "-Pn", "-T4", "--open", "-p", ID_PORTS, "-oG", "-"] + ips, 90)
         f_oui = ex.submit(vendor_online, unknown_macs)
         names = [f.result() for f in f_names]
+        pings = [f.result() for f in f_ping]
+        v6 = f_v6.result()
         mdns, ssdp = f_mdns.result(), (f_ssdp.result() if f_ssdp else {})
         ports_by_ip = {}
         for line in f_ports.result().splitlines():
@@ -876,12 +922,22 @@ def scan_devices():
         oui = f_oui.result()
         f_titles = {h["ip"]: ex.submit(http_title, h["ip"], ports_by_ip.get(h["ip"], set())) for h in hosts if ports_by_ip.get(h["ip"], set()) & {"80", "443", "8080", "8443"}}
         titles = {ip: f.result() for ip, f in f_titles.items()}
-    for h, n in zip(hosts, names):
+    for h, nm, ms in zip(hosts, names, pings):
         if h["mac"] in oui and oui[h["mac"]]:
             h["vendor"] = oui[h["mac"]]
         ports, md, sd, title = ports_by_ip.get(h["ip"], set()), mdns.get(h["ip"], []), ssdp.get(h["ip"], {}), titles.get(h["ip"], "")
         friendly = sd.get("friendly") or (md[0][0] if md else "")
+        n = nm["mdns"] or nm["netbios"] or nm["dns"]
+        if h.get("self"):
+            n = n or run(["hostname"]).strip()
         h["name"] = n or friendly
+        # structured fields for the LAN page (badges + device page); "info" stays for the CSV / report
+        web = next((f"{s}://{h['ip']}" + ("" if p in ("80", "443") else f":{p}") for p, s in WEB_PORTS if p in ports), "")
+        h.update(names=nm, ping=ms, ports=sorted(ports, key=int), web=web, title=title, ipv6=v6.get(h["mac"].lower(), []),
+                 services=sorted({s.lstrip("_").split(".")[0] for _, s in md}),
+                 upnp={k: sd.get(k, "") for k in ("friendly", "manufacturer", "model")} if sd else {},
+                 flags=[f for f, on in (("G", h["ip"] == gw), ("W", bool(web)), ("U", bool(sd)), ("B", bool(md)),
+                                        ("6", bool(v6.get(h["mac"].lower()))), ("P", ms is not None), ("S", bool(h.get("self")))) if on])
         h["type"] = classify(h, ports, md, sd, title, gw)
         bits = []
         if friendly and friendly != h["name"]: bits.append(friendly)
@@ -907,10 +963,62 @@ def devices_csv():
                     headers={"Content-Disposition": "attachment; filename=devices-" + time.strftime("%Y%m%d-%H%M") + ".csv"})
 
 
+def parse_ss(out):
+    """`ss -tulpn` -> listening sockets: proto, address, port, process, scope (all networks / one address / this Pi only)."""
+    rows, seen = [], set()
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) < 5 or p[0] not in ("tcp", "udp") or p[1] not in ("LISTEN", "UNCONN"):
+            continue
+        addr, _, port = p[4].rpartition(":")
+        if not port.isdigit():
+            continue
+        addr, _, iface = addr.strip("[]").partition("%")
+        addr = addr.strip("[]")
+        proc = (re.search(r'users:\(\("([^"]+)"', line) or [None, ""])[1]
+        scope = "local" if addr.startswith("127.") or addr == "::1" else "all" if addr in ("0.0.0.0", "*", "::", "") else "one"
+        key = (p[0], int(port), proc, scope if scope != "one" else addr)
+        if key in seen:                                # the same service on IPv4 and IPv6 is one row
+            continue
+        seen.add(key)
+        rows.append({"proto": p[0], "port": int(port), "addr": addr or "*", "iface": iface, "process": proc, "scope": scope})
+    rows.sort(key=lambda r: ({"all": 0, "one": 1, "local": 2}[r["scope"]], r["proto"] != "tcp", r["port"]))
+    return rows
+
+
 @app.post("/api/ports")
 @require_login
 def ports():
-    return text_tool("Open Ports", ["sudo", PRIV, "ss"])
+    out = run(["sudo", PRIV, "ss"])
+    rows = parse_ss(out)
+    log_history("Open Ports", None, "\n".join(f"{r['proto']:<4} {r['port']:>5}  {r['addr']:<15} {r['process']}" for r in rows) or out)
+    return jsonify({"output": out, "listeners": rows})
+
+
+PROC_NET_DEV = "/proc/net/dev"
+
+
+def net_counters():
+    """Bytes in/out per interface since boot (loopback left out)."""
+    res = {}
+    try:
+        with open(PROC_NET_DEV) as f:
+            lines = f.readlines()[2:]
+    except OSError:
+        return res
+    for line in lines:
+        name, _, rest = line.partition(":")
+        p = rest.split()
+        if len(p) >= 9 and name.strip() != "lo":
+            res[name.strip()] = {"rx": int(p[0]), "tx": int(p[8])}
+    return res
+
+
+@app.get("/api/bandwidth/now")
+@require_login
+def bandwidth_now():
+    """Bandwidth Now page: the page polls this every second and turns the byte counters into Mbps."""
+    return jsonify({"ts": time.time(), "default": default_iface(), "ifaces": net_counters()})
 
 
 @app.post("/api/bandwidth")
@@ -1042,8 +1150,17 @@ def ping_stream():
     except (TypeError, ValueError):
         count = 5
     count = 0 if count <= 0 else min(count, 100)
-    argv = ["ping", "-n", "-O", "-i", "1", "-W", "2"] + (["-c", str(count)] if count else []) + [t]
-    return stream_command("Ping (live)", t, argv, 200 if count else 1800, {"target": t, "count": count})
+    # options (Tools > Ping): interval 0.2-5 s (0.2 is the fastest an unprivileged ping may go), payload 16-1472 bytes
+    # (1472 + 28 = a full 1500-byte packet: with "don't fragment" it finds MTU problems)
+    try:
+        interval = min(5.0, max(0.2, float(data.get("interval", 1))))
+        size = min(1472, max(16, int(data.get("size", 56))))
+    except (TypeError, ValueError):
+        interval, size = 1.0, 56
+    argv = ["ping", "-n", "-O", "-i", ("%g" % interval), "-W", "2", "-s", str(size)] + (["-M", "do"] if data.get("df") is True else []) \
+        + (["-c", str(count)] if count else []) + [t]
+    return stream_command("Ping (live)", t, argv, int(count * interval) + 60 if count else 1800,
+                          {"target": t, "count": count, "interval": interval, "size": size, "df": data.get("df") is True})
 
 
 @app.post("/api/trace/stream")
@@ -1057,10 +1174,12 @@ def trace_stream():
         return jsonify({"error": "invalid target"}), 400
     try:
         count = max(1, min(int(data.get("count", 10)), 60))
+        hops = max(5, min(int(data.get("max_hops", 30)), 64))
     except (TypeError, ValueError):
-        count = 10
-    return stream_command("Route (live)", t, ["mtr", "-n", "--raw", "-c", str(count), "-i", "1", "-Z", "2", t], count + 45,
-                          {"target": t, "count": count}, log_tail=False, idle_done=2.0)
+        count, hops = 10, 30
+    proto = {"udp": ["-u"], "tcp": ["-T", "-P", "443"]}.get(str(data.get("proto", "icmp")), [])   # TCP 443 gets through most firewalls
+    return stream_command("Route (live)", t, ["mtr", "-n", "--raw", "-c", str(count), "-i", "1", "-Z", "2", "-m", str(hops)] + proto + [t], count + 45,
+                          {"target": t, "count": count, "max_hops": hops, "proto": data.get("proto", "icmp")}, log_tail=False, idle_done=2.0)
 
 
 @app.post("/api/portscan/stream")
@@ -1069,11 +1188,24 @@ def portscan_stream():
     """Live port scan: nmap -v prints `Discovered open port N/tcp` the moment it finds one and --stats-every gives progress.
     Uses an unprivileged TCP-connect scan (-sT, no sudo) on purpose: a root nmap started through sudo cannot be signalled by this
     user, so it would keep running after the phone disconnects. Same top-100 ports and open/closed results as the SYN scan."""
-    t = _stream_target(request.get_json(silent=True) or {})
+    data = request.get_json(silent=True) or {}
+    t = _stream_target(data)
     if not t:
         return jsonify({"error": "invalid target"}), 400
-    argv = ["/usr/bin/nmap", "-sT", "-Pn", "-T4", "--top-ports", "100", "-v", "--stats-every", "1s", t]
-    return stream_command("Port Scan (live)", t, argv, 180, {"target": t})
+    # Tools > Ports: common (top 100), top 1000, or a range "start-end"
+    mode, which, limit = str(data.get("mode", "top100")), ["--top-ports", "100"], 180
+    if mode == "top1000":
+        which, limit = ["--top-ports", "1000"], 600
+    elif mode == "range":
+        try:
+            a, b = int(data.get("start", 1)), int(data.get("end", 1024))
+        except (TypeError, ValueError):
+            return jsonify({"error": "the port range must be numbers"}), 400
+        if not (1 <= a <= b <= 65535):
+            return jsonify({"error": "ports go from 1 to 65535, start first"}), 400
+        which, limit = ["-p", "%d-%d" % (a, b)], min(1800, 120 + (b - a + 1) // 20)
+    argv = ["/usr/bin/nmap", "-sT", "-Pn", "-T4"] + which + ["-v", "--stats-every", "1s", t]
+    return stream_command("Port Scan (live)", t, argv, limit, {"target": t, "mode": mode})
 
 
 @app.post("/api/pinggw")
@@ -1094,6 +1226,164 @@ def portscan():
     if not t:
         return jsonify({"error": "invalid target"}), 400
     return text_tool("Port Scan", ["sudo", PRIV, "nmap", "-Pn", "-T4", "--top-ports", "100", t], t, timeout=120)
+
+
+def whois43(server, query, timeout=10):
+    """Classic whois (TCP port 43): send the query, read the answer (capped at 256 kB)."""
+    out = b""
+    with socket.create_connection((server, 43), timeout=timeout) as c:
+        c.settimeout(timeout)
+        c.sendall((query + "\r\n").encode("ascii", "ignore"))
+        while len(out) < 262144:
+            chunk = c.recv(8192)
+            if not chunk:
+                break
+            out += chunk
+    return out.decode("utf-8", "replace")
+
+
+WHOIS_KEYS = {"registrar": "registrar", "registrant organization": "registrant", "registrant": "registrant",
+              "creation date": "registration", "created": "registration", "registered on": "registration",
+              "updated date": "last changed", "last updated": "last changed", "last modified": "last changed",
+              "registry expiry date": "expiration", "registrar registration expiration date": "expiration", "expiry date": "expiration",
+              "expiration date": "expiration", "expires": "expiration", "paid-till": "expiration",
+              "domain status": "status", "status": "status", "name server": "ns", "nserver": "ns", "dnssec": "dnssec",
+              "registrar abuse contact email": "abuse"}
+
+
+def whois_classic(t):
+    """Whois for domains without RDAP: whois.iana.org names the TLD's server, that server answers in "Key: value" lines."""
+    tld = t.rsplit(".", 1)[-1].lower()
+    try:
+        ref = re.search(r"^(?:refer|whois):\s*(\S+)", whois43("whois.iana.org", tld), re.M)
+        if not ref:
+            return jsonify({"error": "%s: no whois server is known for .%s" % (t, tld)}), 404
+        server = ref.group(1)
+        text = whois43(server, t)
+    except OSError as e:
+        return jsonify({"error": "%s: whois lookup failed (%s)" % (t, e.__class__.__name__)}), 502
+    out = {"kind": "domain", "name": t, "handle": "", "status": [], "events": {}, "registrar": "", "registrant": "", "abuse": "",
+           "nameservers": [], "dnssec": False, "range": "", "netname": "", "country": "", "org": "", "source": server}
+    for line in text.splitlines():
+        k, sep, v = line.strip().partition(":")
+        key, v = WHOIS_KEYS.get(k.strip().lower()), v.strip()
+        if not sep or not key or not v or "REDACTED" in v.upper():
+            continue
+        if key in ("registration", "last changed", "expiration"):
+            out["events"].setdefault(key, v[:10])
+        elif key == "status":
+            st = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", v.split()[0]).lower()     # clientTransferProhibited -> client transfer prohibited
+            if st not in out["status"]:
+                out["status"].append(st)
+        elif key == "ns":
+            ns = v.split()[0].lower().rstrip(".")
+            if ns not in out["nameservers"]:
+                out["nameservers"].append(ns)
+        elif key == "dnssec":
+            out["dnssec"] = v.lower().startswith("signed") or v.lower() == "yes"
+        elif not out[key]:
+            out[key] = v
+    if not (out["registrar"] or out["nameservers"] or out["events"]):
+        return jsonify({"error": "%s: not found at %s (not registered?)" % (t, server)}), 404
+    log_history("Whois", t, "\n".join(f"{k}: {', '.join(v) if isinstance(v, list) else v}" for k, v in out.items()
+                                     if v and k not in ("events", "kind", "name")) + "".join(f"\n{k}: {v}" for k, v in out["events"].items()))
+    return jsonify(out)
+
+
+DNS_TYPES = ("A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "PTR", "SRV", "CAA")
+IPV4 = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
+
+
+@app.post("/api/dns/query")
+@require_login
+def dns_query():
+    """Tools > DNS: one record type or ALL, against the system resolver or a chosen server; answers as rows."""
+    data = request.get_json(silent=True) or {}
+    t = target_from_request()
+    if not t:
+        return jsonify({"error": "invalid name"}), 400
+    rtype = str(data.get("type", "ALL")).upper()
+    if rtype != "ALL" and rtype not in DNS_TYPES:
+        return jsonify({"error": "unknown record type"}), 400
+    server = str(data.get("server", "")).strip()
+    if server and not VALID_TARGET.match(server):
+        return jsonify({"error": "invalid DNS server"}), 400
+    is_ip = bool(IPV4.match(t)) or (":" in t)
+    types = ["PTR"] if is_ip and rtype in ("ALL", "PTR") else (["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "CAA"] if rtype == "ALL" else [rtype])
+
+    def one(qt):
+        argv = ["dig", "+noall", "+answer", "+comments", "+stats", "+time=3", "+tries=1"] + (["@" + server] if server else [])
+        argv += ["-x", t] if qt == "PTR" and is_ip else [t, qt]
+        out = run(argv, timeout=10)
+        rows = []
+        for line in out.splitlines():
+            if line.startswith(";") or not line.strip():
+                continue
+            p = line.split(None, 4)
+            if len(p) == 5 and p[2] == "IN":
+                rows.append({"name": p[0].rstrip("."), "ttl": int(p[1]) if p[1].isdigit() else None, "type": p[3], "value": p[4].strip()})
+        st = (re.search(r"status: (\w+)", out) or [None, "TIMEOUT" if "timed out" in out else "?"])[1]
+        ms = (re.search(r"Query time: (\d+) msec", out) or [None, None])[1]
+        srv = (re.search(r"SERVER: ([^#\s]+)", out) or [None, server or "?"])[1]
+        return {"type": qt, "status": st, "ms": int(ms) if ms else None, "server": srv, "rows": rows}
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        res = list(ex.map(one, types))
+    rows = [r for x in res for r in x["rows"]]
+    log_history("DNS " + rtype, t, "\n".join(f"{r['type']:<6} {r['ttl'] or '':>6}  {r['value']}" for r in rows) or "no records")
+    return jsonify({"name": t, "type": rtype, "server": next((x["server"] for x in res if x["server"] != "?"), server or "system"),
+                    "results": res, "rows": rows})
+
+
+@app.post("/api/whois")
+@require_login
+def whois():
+    """Tools > Whois, by RDAP (the modern, JSON whois): who registered a domain / who owns an IP range."""
+    t = target_from_request()
+    if not t:
+        return jsonify({"error": "invalid name"}), 400
+    kind = "ip" if IPV4.match(t) or ":" in t else "domain"
+    raw = run(["curl", "-s", "-L", "--max-time", "12", "-H", "Accept: application/rdap+json", f"https://rdap.org/{kind}/{t}"], timeout=16)
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        d = None
+    if not isinstance(d, dict) or d.get("errorCode"):
+        if kind == "domain":                       # .io and many country domains have no RDAP yet: ask their classic whois server
+            return whois_classic(t)
+        if d is None:
+            return jsonify({"error": "no RDAP answer for %s (not a registered domain / no internet?)" % t}), 502
+        return jsonify({"error": "%s: %s" % (t, d.get("title") or "not found")}), 404
+
+    def vcard_name(e):
+        for item in ((e.get("vcardArray") or [None, []])[1] or []):
+            if isinstance(item, list) and len(item) > 3 and item[0] in ("fn", "org") and item[3]:
+                return str(item[3])
+        return ""
+
+    def vcard_email(e):
+        for item in ((e.get("vcardArray") or [None, []])[1] or []):
+            if isinstance(item, list) and len(item) > 3 and item[0] == "email":
+                return str(item[3])
+        return ""
+    ents = d.get("entities") or []
+    by_role = {}
+    for e in ents + [n for e in ents for n in (e.get("entities") or []) if isinstance(n, dict)]:   # .com puts the abuse contact under the registrar
+        for r in e.get("roles") or []:
+            by_role.setdefault(r, e)
+    events = {e.get("eventAction"): (e.get("eventDate") or "")[:10] for e in d.get("events") or [] if isinstance(e, dict)}
+    out = {"kind": kind, "name": t, "handle": d.get("handle", ""), "status": d.get("status") or [], "events": events,
+           "registrar": vcard_name(by_role.get("registrar", {})), "registrant": vcard_name(by_role.get("registrant", {})),
+           "abuse": vcard_email(by_role.get("abuse", {})),
+           "nameservers": [n.get("ldhName", "").lower().rstrip(".") for n in d.get("nameservers") or [] if isinstance(n, dict)],
+           "dnssec": bool((d.get("secureDNS") or {}).get("delegationSigned")),
+           "range": (d.get("startAddress", "") + " - " + d.get("endAddress", "")) if kind == "ip" else "",
+           "netname": d.get("name", ""), "country": d.get("country", ""),
+           "org": vcard_name(by_role.get("registrant", {})) or vcard_name(by_role.get("administrative", {})) or vcard_name(ents[0] if ents else {}),
+           "source": "rdap.org"}
+    log_history("Whois", t, "\n".join(f"{k}: {', '.join(v) if isinstance(v, list) else v}" for k, v in out.items()
+                                     if v and k not in ("events", "source", "kind", "name")) + "".join(f"\n{k}: {v}" for k, v in out["events"].items()))
+    return jsonify(out)
 
 
 @app.post("/api/dns")
@@ -1397,23 +1687,35 @@ def dhcp_check():
         f"server {s}  router {routers[i] if i < len(routers) else '?'}  offered {offered[i] if i < len(offered) else '?'}  dns {dns[i].strip() if i < len(dns) else '?'}"
         for i, s in enumerate(servers)) + ("\n\n" + out.strip() if not servers else "")
     log_history("Rogue DHCP check", iface, text)
-    return jsonify({"output": text, "servers": uniq, "rogue": len(uniq) > 1})
+    return jsonify({"output": text, "servers": uniq, "rogue": len(uniq) > 1, "iface": iface, "gateway": default_gw(), "offers": parse_dhcp_offers(out)})
+
+
+def parse_dhcp_offers(out):
+    """nmap broadcast-dhcp-discover: one block per answer ("Response 1 of 2:") -> one dict per offer."""
+    offers = []
+    for blk in re.split(r"Response \d+ of \d+:", out)[1:]:
+        def g(k):
+            m = re.search(r"\b" + k + r":[ \t]*(.+)", blk)
+            return m.group(1).strip() if m else ""
+        offers.append({"server": g("Server Identifier"), "offered": g("IP Offered"), "router": g("Router"), "dns": g("Domain Name Server"),
+                       "mask": g("Subnet Mask"), "lease": g("IP Address Lease Time"), "domain": g("Domain Name")})
+    return offers
 
 
 DEFAULT_SERVICES = [
-    {"name": "Gateway", "type": "gw"},
-    {"name": "Internet (1.1.1.1)", "type": "ping", "target": "1.1.1.1"},
-    {"name": "Internet (8.8.8.8)", "type": "ping", "target": "8.8.8.8"},
-    {"name": "DNS resolve (google.com)", "type": "dns", "target": "google.com"},
-    {"name": "Google", "type": "https", "target": "https://www.google.com/generate_204"},
-    {"name": "Cloudflare", "type": "https", "target": "https://www.cloudflare.com/cdn-cgi/trace"},
-    {"name": "Square POS", "type": "https", "target": "https://squareup.com"},
-    {"name": "Square API", "type": "https", "target": "https://connect.squareup.com"},
-    {"name": "Toast POS", "type": "https", "target": "https://pos.toasttab.com"},
-    {"name": "Clover POS", "type": "https", "target": "https://www.clover.com"},
-    {"name": "Spotify", "type": "https", "target": "https://api.spotify.com"},
-    {"name": "YoDeck signage", "type": "https", "target": "https://app.yodeck.com"},
-    {"name": "Omada cloud", "type": "https", "target": "https://omada.tplinkcloud.com"},
+    {"name": "Gateway", "type": "gw", "group": "Network"},
+    {"name": "Internet (1.1.1.1)", "type": "ping", "target": "1.1.1.1", "group": "Network"},
+    {"name": "Internet (8.8.8.8)", "type": "ping", "target": "8.8.8.8", "group": "Network"},
+    {"name": "DNS resolve (google.com)", "type": "dns", "target": "google.com", "group": "Network"},
+    {"name": "Google", "type": "https", "target": "https://www.google.com/generate_204", "group": "Apps"},
+    {"name": "Cloudflare", "type": "https", "target": "https://www.cloudflare.com/cdn-cgi/trace", "group": "Apps"},
+    {"name": "Square POS", "type": "https", "target": "https://squareup.com", "group": "Payments"},
+    {"name": "Square API", "type": "https", "target": "https://connect.squareup.com", "group": "Payments"},
+    {"name": "Toast POS", "type": "https", "target": "https://pos.toasttab.com", "group": "Payments"},
+    {"name": "Clover POS", "type": "https", "target": "https://www.clover.com", "group": "Payments"},
+    {"name": "Spotify", "type": "https", "target": "https://api.spotify.com", "group": "Apps"},
+    {"name": "YoDeck signage", "type": "https", "target": "https://app.yodeck.com", "group": "Apps"},
+    {"name": "Omada cloud", "type": "https", "target": "https://omada.tplinkcloud.com", "group": "Apps"},
 ]
 
 
@@ -1458,7 +1760,7 @@ def services():
         extra = json.load(open(CONFIG_PATH)).get("service_checks") or []
     except Exception:
         extra = []
-    checks = DEFAULT_SERVICES + [c for c in extra if isinstance(c, dict) and c.get("name")]
+    checks = DEFAULT_SERVICES + [dict(c, group="Your checks") for c in extra if isinstance(c, dict) and c.get("name")]
     with ThreadPoolExecutor(max_workers=8) as ex:
         fut = ex.submit(lan_services)
         results = list(ex.map(check_service, checks))
@@ -1496,48 +1798,77 @@ def lan_services():
     return {"subnet": cidr, "found": found}
 
 
+JACK_IFACE = "eth0"
+
+
+def jack_sysfs(f):
+    try:
+        with open(f"/sys/class/net/{JACK_IFACE}/{f}") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+@app.get("/api/jack/link")
+@require_login
+def jack_link():
+    """Cheap: is a cable plugged in? (the Jack Test page polls this while it waits for a cable)"""
+    up = jack_sysfs("carrier") == "1"
+    return jsonify({"iface": JACK_IFACE, "link": up, "speed": jack_sysfs("speed") if up else "", "duplex": jack_sysfs("duplex") if up else ""})
+
+
 @app.post("/api/jack")
 @require_login
 def jack_test():
-    """Ethernet jack tester: link, DHCP, LLDP switch/port, VLAN tags, internet via eth0."""
-    iface = "eth0"
-    sysfs = lambda f: run(["cat", f"/sys/class/net/{iface}/{f}"]).strip()  # noqa: E731
-    carrier = sysfs("carrier") == "1"
-    lines = [f"Jack test on {iface}"]
-    if not carrier:
-        text = "\n".join(lines + ["", "❌ NO LINK — nothing on the other end. Dead jack, unpatched port, or the port is shut down."])
+    """Ethernet jack tester: link, DHCP, LLDP switch/port, VLAN tags, internet via eth0. Each step is a check (ok / warn / bad / info)."""
+    iface = JACK_IFACE
+    checks = []
+
+    def add(k, state, title, detail=""):
+        checks.append({"k": k, "state": state, "title": title, "detail": detail})
+
+    def done(**extra):
+        icon = {"ok": "\u2705", "warn": "\u26a0", "bad": "\u274c", "info": "\u2139"}
+        text = "\n".join([f"Jack test on {iface}"] + [f"{icon[c['state']]} {c['title']}" + (f" \u2014 {c['detail']}" if c["detail"] else "") for c in checks])
         log_history("Jack test", iface, text)
-        return jsonify({"output": text, "link": False})
-    speed, duplex = sysfs("speed"), sysfs("duplex")
-    lines.append(f"✅ LINK UP — {speed} Mb/s {duplex} duplex" + ("  ⚠ (only 100 Mb/s: bad cable/pair or a 100M port)" if speed == "100" else "") + ("  ⚠ (10 Mb/s: damaged cable)" if speed == "10" else ""))
-    # DHCP / addressing (NetworkManager has usually already configured eth0)
+        return jsonify(dict({"output": text, "iface": iface, "checks": checks}, **extra))
+    if jack_sysfs("carrier") != "1":
+        add("link", "bad", "No link", "nothing on the other end: dead jack, unpatched port, or the switch port is shut down")
+        return done(link=False)
+    speed, duplex = jack_sysfs("speed"), jack_sysfs("duplex")
+    if speed in ("10", "100"):
+        add("link", "warn", f"Link up \u00b7 {speed} Mb/s {duplex}", "only 100 Mb/s: a bad pair in the cable, or a 100M port" if speed == "100" else "10 Mb/s: damaged cable")
+    else:
+        add("link", "ok", f"Link up \u00b7 {speed} Mb/s {duplex}" if speed and speed != "-1" else "Link up")
     dev = run(["nmcli", "-t", "-f", "IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,DHCP4.OPTION", "device", "show", iface])
     addr = re.findall(r"IP4\.ADDRESS\[\d+\]:(\S+)", dev); gw = re.findall(r"IP4\.GATEWAY:(\S+)", dev)
     dnsl = re.findall(r"IP4\.DNS\[\d+\]:(\S+)", dev); srv = re.findall(r"dhcp_server_identifier = (\S+)", dev)
     dom = re.findall(r"domain_name = (\S+)", dev)
     if addr:
-        lines.append(f"✅ DHCP OK — got {addr[0]}  gateway {gw[0] if gw else '?'}  dns {', '.join(dnsl) or '?'}"
-                     + (f"  (server {srv[0]})" if srv else "") + (f"  domain {dom[0]}" if dom else ""))
+        add("dhcp", "ok", f"Got an address \u00b7 {addr[0]}", f"gateway {gw[0] if gw and gw[0] != '--' else '?'} \u00b7 DNS {', '.join(dnsl) or '?'}"
+            + (f" \u00b7 DHCP server {srv[0]}" if srv else "") + (f" \u00b7 domain {dom[0]}" if dom else ""))
     else:
-        lines.append("❌ NO IP — link is up but DHCP gave nothing. Wrong VLAN, port isolated, or no DHCP on this segment.")
-    # LLDP / CDP neighbor (lldpd listens continuously; ~30 s after link-up it knows)
+        add("dhcp", "bad", "No IP address", "the link is up but DHCP gave nothing: wrong VLAN, port isolated, or no DHCP on this segment")
     ll = run(["sudo", PRIV, "lldp", iface], timeout=10)
     sysname = re.search(r"SysName:\s*(.+)", ll); portid = re.search(r"PortID:\s*(.+)", ll); portd = re.search(r"PortDescr:\s*(.+)", ll)
     if sysname or portid:
-        lines.append(f"🔌 SWITCH: {sysname.group(1).strip() if sysname else '?'}  PORT: {portid.group(1).strip() if portid else '?'}"
-                     + (f"  ({portd.group(1).strip()})" if portd else ""))
+        add("switch", "ok", f"Switch {sysname.group(1).strip() if sysname else '?'} \u00b7 port {portid.group(1).strip() if portid else '?'}",
+            portd.group(1).strip() if portd else "")
     else:
-        lines.append("ℹ no LLDP/CDP neighbor yet (switch may not send it, or wait ~30 s after plugging in and re-test)")
-    # VLAN tags seen on the wire (a trunk port shows tagged frames)
+        add("switch", "info", "Switch / port not announced", "the switch may not send LLDP/CDP, or wait ~30 s after plugging in and test again")
     vl = run(["sudo", PRIV, "vlan-sniff", iface], timeout=12)
     tags = sorted(set(re.findall(r"vlan (\d+)", vl)), key=int)
-    lines.append(f"🏷 VLAN tags seen: {', '.join(tags)}  (tagged traffic = trunk port)" if tags else "🏷 no tagged VLAN frames seen (access port — normal for a device jack)")
-    # Internet through this jack specifically
+    if tags:
+        add("vlan", "info", "Tagged VLANs: " + ", ".join(tags), "tagged traffic = a trunk port")
+    else:
+        add("vlan", "ok", "No VLAN tags", "an access port: normal for a device jack")
     pg = run(["ping", "-I", iface, "-c", "2", "-W", "2", "1.1.1.1"], timeout=8)
-    lines.append("✅ INTERNET via this jack: yes" if "received" in pg and " 0 received" not in pg else "❌ INTERNET via this jack: no")
-    text = "\n".join(lines)
-    log_history("Jack test", iface, text)
-    return jsonify({"output": text, "link": True, "speed": speed, "ip": addr[0] if addr else None})
+    ms = re.search(r"= [\d.]+/([\d.]+)/", pg)
+    if "received" in pg and " 0 received" not in pg:
+        add("internet", "ok", "Internet through this jack" + (f" \u00b7 {float(ms.group(1)):.0f} ms" if ms else ""))
+    else:
+        add("internet", "bad", "No internet through this jack")
+    return done(link=True, speed=speed, ip=addr[0] if addr else None)
 
 
 @app.get("/api/iperf/info")
@@ -1589,18 +1920,74 @@ def pubip():
         url = "https://api.ipinfo.io/lite/me?token=" + token
     else:
         url = "https://ipinfo.io/json"
-    out = run(["curl", "-s", "--max-time", "10", url], timeout=15)
-    return jsonify({"output": out or "Lookup failed (no internet?)"})
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f4 = ex.submit(run, ["curl", "-s", "-4", "--max-time", "10", url], timeout=15)
+        f6 = ex.submit(run, ["curl", "-s", "-6", "--max-time", "5", "https://api6.ipify.org"], timeout=8)
+        out, v6 = f4.result(), f6.result().strip()
+    info = pubip_info(out)
+    ipv6 = v6 if re.fullmatch(r"[0-9a-fA-F:]{3,39}", v6) and ":" in v6 else ""
+    if info:
+        log_history("Public IP", None, "\n".join(f"{k}: {v}" for k, v in info.items() if v) + "\nipv6: " + (ipv6 or "none"))
+    return jsonify({"output": out or "Lookup failed (no internet?)", "info": info, "ipv6": ipv6})
+
+
+def pubip_info(out):
+    """ipinfo.io (free: org = "AS7922 Example ISP") or ipinfo lite (asn / as_name) -> one shape."""
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return {}
+    if not isinstance(d, dict) or not d.get("ip"):
+        return {}
+    org = str(d.get("org") or "")
+    m = re.match(r"^(AS\d+)\s+(.*)$", org)
+    return {"ip": d.get("ip", ""), "hostname": d.get("hostname", ""), "isp": d.get("as_name") or (m.group(2) if m else org),
+            "asn": d.get("asn") or (m.group(1) if m else ""), "domain": d.get("as_domain", ""),
+            "city": d.get("city", ""), "region": d.get("region", ""), "country": d.get("country_code") or d.get("country", ""),
+            "country_name": d.get("country", "") if d.get("country_code") else "", "timezone": d.get("timezone", "")}
+
+
+RESOLV_CONF = "/etc/resolv.conf"
+DNSCHECK_NAMES = ("google.com", "cloudflare.com", "microsoft.com", "squareup.com")
+PUBLIC_DNS = (("Cloudflare", "1.1.1.1"), ("Google", "8.8.8.8"), ("Quad9", "9.9.9.9"))
+
+
+def dig_one(server, name, qtype="A"):
+    out = run(["dig", "+noall", "+answer", "+comments", "+stats", "+time=2", "+tries=1"] + (["@" + server] if server else []) + [name, qtype], timeout=6)
+    st = (re.search(r"status: (\w+)", out) or [None, "TIMEOUT" if "timed out" in out or "no servers" in out else "ERROR"])[1]
+    ms = re.search(r"Query time: (\d+) msec", out)
+    answers = [ln for ln in out.splitlines() if ln.strip() and not ln.startswith(";")]
+    return {"name": name, "status": st, "ms": int(ms.group(1)) if ms and st == "NOERROR" else None, "answers": len(answers)}
 
 
 @app.post("/api/dnscheck")
 @require_login
 def dnscheck():
-    resolvers = run(["/bin/sh", "-c", "grep -E '^nameserver' /etc/resolv.conf"])
-    timing = run(["/bin/sh", "-c", "dig google.com | grep -E 'SERVER:|Query time:'"], timeout=20)
-    out = "--- resolvers in use ---\n" + resolvers + "\n--- resolve google.com ---\n" + timing
-    log_history("DNS Check", None, out)
-    return jsonify({"output": out})
+    """DNS Check page: the network's DNS servers against public ones, same names, side by side; plus an NXDOMAIN-hijack test."""
+    try:
+        with open(RESOLV_CONF) as f:
+            resolvers = re.findall(r"^nameserver\s+(\S+)", f.read(), re.M)
+    except OSError:
+        resolvers = []
+    servers = [("This network", r) for r in resolvers[:3]] or [("System", "")]
+    servers += [(n, ip) for n, ip in PUBLIC_DNS if ip not in resolvers]
+    jobs = [(i, nm) for i in range(len(servers)) for nm in DNSCHECK_NAMES]
+    bogus = "jarvis-nx-%s.com" % secrets.token_hex(6)                  # must not exist: an answer = the DNS rewrites typos (ads)
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        res = list(ex.map(lambda j: dig_one(servers[j[0]][1], j[1]), jobs))
+        nx = dig_one(servers[0][1], bogus)
+    rows = []
+    for i, (label, ip) in enumerate(servers):
+        rs = [r for (k, _), r in zip(jobs, res) if k == i]
+        ms = [r["ms"] for r in rs if r["ms"] is not None]
+        rows.append({"label": label, "server": ip or "system", "mine": i < len(resolvers) or not resolvers,
+                     "avg": round(sum(ms) / len(ms)) if ms else None, "min": min(ms) if ms else None, "max": max(ms) if ms else None,
+                     "ok": len(ms), "fail": len(rs) - len(ms), "results": rs})
+    hijack = nx["status"] == "NOERROR" and nx["answers"] > 0
+    text = "\n".join(f"{r['label']:<13} {r['server']:<16} " + (f"avg {r['avg']} ms ({r['min']}-{r['max']})" if r["avg"] is not None else "no answer")
+                     + (f"  {r['fail']} failed" if r["fail"] else "") for r in rows) + ("\n\u26a0 NXDOMAIN hijacking: made-up names get an answer" if hijack else "")
+    log_history("DNS Check", None, text)
+    return jsonify({"output": text, "resolvers": resolvers, "rows": rows, "names": list(DNSCHECK_NAMES), "hijack": hijack, "nx_status": nx["status"]})
 
 
 @app.post("/api/wol")
@@ -1640,10 +2027,20 @@ def admin_find():
 def history():
     try:
         with open(HISTORY) as f:
-            lines = f.readlines()[-500:]
-        return jsonify({"output": "".join(lines) or "No history yet."})
+            text = f.read()[-400000:]
     except FileNotFoundError:
-        return jsonify({"output": "No history yet — run a tool first."})
+        return jsonify({"output": "No history yet — run a tool first.", "entries": []})
+    lines = text.splitlines(True)[-500:]
+    return jsonify({"output": "".join(lines) or "No history yet.", "entries": parse_history(text)[:300]})
+
+
+def parse_history(text):
+    """history.log -> entries, newest first: {ts, label, target, text}."""
+    out = []
+    for m in re.finditer(r"^===== \[([^\]]+)\] (.*?) =====\n(.*?)(?=^===== \[|\Z)", text, re.M | re.S):
+        label, _, target = m.group(2).partition(" -> ")
+        out.append({"ts": m.group(1), "label": label, "target": target, "text": m.group(3).strip()})
+    return out[::-1]
 
 
 MODEL_PATH = "/proc/device-tree/model"
@@ -2285,6 +2682,7 @@ def agent_set_ap():
 # setup wizard. Saved reports stay until deleted (Settings > Saved Reports); the history they were made from does not.
 REPORTS_DIR = "/var/lib/jarvis-nettools/reports"
 REPORT_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{4}(-\d+)?_[A-Za-z0-9._-]{1,60}\.html$")
+REPORT_PDF = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{4}(-\d+)?_[A-Za-z0-9._-]{1,60}\.pdf$")
 REPORTS_KEEP = 200
 
 
@@ -2319,7 +2717,9 @@ def visit_finish():
     os.chmod(tmp, 0o640)
     os.replace(tmp, os.path.join(REPORTS_DIR, name))
     for old in report_list()[REPORTS_KEEP:]:
-        os.remove(os.path.join(REPORTS_DIR, old["name"]))
+        for f in (old["name"], old["name"][:-5] + ".pdf"):
+            if os.path.exists(os.path.join(REPORTS_DIR, f)):
+                os.remove(os.path.join(REPORTS_DIR, f))
     clear_history("finished")
     run(["sudo", "/usr/local/bin/wifi-clear"], timeout=40)      # visited sites' Wi-Fi; keeps own networks + the one in use
     v = load_visit() or {"date": today(), "company": "", "location": ""}
@@ -2331,6 +2731,198 @@ def visit_finish():
     return jsonify({"ok": True, "report": name, "site": site})
 
 
+def report_pdf(name):
+    """The PDF of a saved report (made once, next to the HTML, by headless Chromium). Returns its file name."""
+    pdf = name[:-5] + ".pdf"
+    path = os.path.join(REPORTS_DIR, pdf)
+    if not os.path.exists(path):
+        prof = tempfile.mkdtemp(prefix="nt-pdf-")
+        try:
+            subprocess.run(["chromium", "--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run",
+                            "--user-data-dir=" + prof, "--no-pdf-header-footer", "--print-to-pdf=" + path + ".tmp",
+                            "file://" + os.path.join(REPORTS_DIR, name)], capture_output=True, timeout=90)
+        finally:
+            shutil.rmtree(prof, ignore_errors=True)
+        if not os.path.exists(path + ".tmp"):
+            raise OSError("could not make the PDF")
+        os.chmod(path + ".tmp", 0o640)
+        os.replace(path + ".tmp", path)
+    return pdf
+
+
+def report_name_or_404(name):
+    name = str(name or "")
+    return name if REPORT_NAME.match(name) and os.path.exists(os.path.join(REPORTS_DIR, name)) else None
+
+
+# ---- share a saved report: USB flash drive / email ------------------------------------------------------------
+def priv_json(args, timeout):
+    """Run the root helper and read its JSON answer from stdout only (sudo may write notes to stderr)."""
+    try:
+        p = subprocess.run(["sudo", PRIV] + args, capture_output=True, text=True, timeout=timeout)
+        return json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else None
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError):
+        return None
+
+
+@app.get("/api/usb")
+@require_login
+def usb_list():
+    d = priv_json(["usb-list"], 20)
+    return jsonify({"drives": d if isinstance(d, list) else []})
+
+
+@app.post("/api/reports/usb")
+@require_login
+def report_to_usb():
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
+    name, dev = report_name_or_404(data.get("name")), str(data.get("dev", ""))
+    if not name:
+        return jsonify({"error": "no such report"}), 404
+    if not re.match(r"^/dev/(sd[a-z]{1,2}[0-9]{0,2})$", dev):
+        return jsonify({"error": "no USB drive chosen"}), 400
+    try:
+        pdf = report_pdf(name)
+    except (OSError, subprocess.SubprocessError) as e:
+        return jsonify({"error": str(e)}), 500
+    r = priv_json(["usb-save", dev, name, pdf], 120)
+    if not isinstance(r, dict):
+        r = {"ok": False, "error": "the USB helper did not answer"}
+    if r.get("ok"):
+        log_history("Report to USB", (r.get("label") or r.get("model") or dev), ", ".join(r.get("copied", [])))
+    return jsonify(r), (200 if r.get("ok") else 400)
+
+
+MAIL_ADDR = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}$")
+MAIL_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
+
+
+def mail_cfg():
+    m = load_cfg().get("mail") or {}
+    return m if isinstance(m, dict) else {}
+
+
+def mail_public(m=None):
+    m = mail_cfg() if m is None else m
+    return {"host": m.get("host", ""), "port": m.get("port", 587), "security": m.get("security", "starttls"),
+            "user": m.get("user", ""), "from": m.get("from", ""), "to": m.get("to", []),
+            "password_set": bool(m.get("password")), "ready": bool(m.get("host") and m.get("from") and m.get("password"))}
+
+
+def recipients(v):
+    items = v if isinstance(v, list) else re.split(r"[\s,;]+", str(v or ""))
+    out = [x.strip() for x in items if str(x).strip()]
+    if not out or len(out) > 10 or not all(MAIL_ADDR.match(x) for x in out):
+        return None
+    return out
+
+
+def send_mail(m, to, subject, body, attachment=None):
+    import smtplib
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["From"], msg["To"], msg["Subject"] = m["from"], ", ".join(to), subject
+    msg.set_content(body)
+    if attachment:
+        with open(attachment, "rb") as f:
+            msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=os.path.basename(attachment))
+    port = int(m.get("port") or 587)
+    if m.get("security") == "ssl":
+        s = smtplib.SMTP_SSL(m["host"], port, timeout=25)
+    else:
+        s = smtplib.SMTP(m["host"], port, timeout=25)
+        s.starttls()
+    try:
+        if m.get("user"):
+            s.login(m["user"], m["password"])
+        s.send_message(msg)
+    finally:
+        s.quit()
+
+
+@app.get("/api/mail")
+@require_login
+def mail_get():
+    return jsonify(mail_public())
+
+
+@app.post("/api/mail")
+@require_login
+def mail_set():
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
+    c = load_cfg()
+    m = dict(c.get("mail") or {})
+    host = str(data.get("host", "")).strip()
+    if host and not MAIL_HOST.match(host):
+        return jsonify({"error": "server name looks wrong"}), 400
+    try:
+        port = int(data.get("port") or 587)
+        assert 1 <= port <= 65535
+    except (ValueError, TypeError, AssertionError):
+        return jsonify({"error": "port must be a number"}), 400
+    sec = data.get("security") if data.get("security") in ("starttls", "ssl") else "starttls"
+    frm = str(data.get("from", "")).strip()
+    if frm and not MAIL_ADDR.match(frm):
+        return jsonify({"error": "the From address looks wrong"}), 400
+    to = recipients(data.get("to")) if str(data.get("to", "")).strip() else []
+    if to is None:
+        return jsonify({"error": "check the To addresses (up to 10, separated by commas)"}), 400
+    m.update(host=host, port=port, security=sec, user=str(data.get("user", "")).strip()[:120], to=to)
+    m["from"] = frm
+    if data.get("password"):                       # empty = keep the saved one
+        m["password"] = str(data["password"])[:200]
+    c["mail"] = m
+    save_cfg(c)
+    log_history("Settings", None, "email settings saved")
+    return jsonify({"ok": True, **mail_public(m)})
+
+
+@app.post("/api/mail/test")
+@require_login
+def mail_test():
+    m = mail_cfg()
+    to = recipients(m.get("to")) or ([m["from"]] if m.get("from") else None)
+    if not mail_public(m)["ready"] or not to:
+        return jsonify({"error": "fill in the server, From address and password first"}), 400
+    try:
+        send_mail(m, to, "Jarvis Net Tools: test email", "This is a test from your Jarvis Net Tools Pi. Email reports work.")
+    except Exception as e:                          # smtplib / socket / ssl errors: show them to the user
+        return jsonify({"error": "could not send: %s" % str(e)[:200]}), 502
+    return jsonify({"ok": True, "to": to})
+
+
+@app.post("/api/reports/email")
+@require_login
+def report_email():
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
+    name = report_name_or_404(data.get("name"))
+    if not name:
+        return jsonify({"error": "no such report"}), 404
+    m = mail_cfg()
+    if not mail_public(m)["ready"]:
+        return jsonify({"error": "set up email first: Settings > Email Reports"}), 400
+    to = recipients(data.get("to") or m.get("to"))
+    if not to:
+        return jsonify({"error": "check the To addresses (up to 10, separated by commas)"}), 400
+    try:
+        pdf = report_pdf(name)
+    except (OSError, subprocess.SubprocessError) as e:
+        return jsonify({"error": str(e)}), 500
+    site = name[16:-5].split("_", 1)[-1].replace("-", " ")
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(os.path.join(REPORTS_DIR, name))))
+    try:
+        send_mail(m, to, "Network site report: %s (%s)" % (site, when),
+                  "Attached: the network site report for %s, made %s by Jarvis Net Tools.\n" % (site, when),
+                  os.path.join(REPORTS_DIR, pdf))
+    except Exception as e:
+        return jsonify({"error": "could not send: %s" % str(e)[:200]}), 502
+    log_history("Report emailed", site, ", ".join(to))
+    return jsonify({"ok": True, "to": to})
+
+
 @app.get("/api/reports")
 @require_login
 def reports_get():
@@ -2340,6 +2932,12 @@ def reports_get():
 @app.get("/api/reports/<name>")
 @require_login
 def report_file(name):
+    if REPORT_PDF.match(name) and report_name_or_404(name[:-4] + ".html"):           # PDF on demand
+        try:
+            name = report_pdf(name[:-4] + ".html")
+        except (OSError, subprocess.SubprocessError) as e:
+            return jsonify({"error": str(e)}), 500
+        return send_from_directory(REPORTS_DIR, name, mimetype="application/pdf", as_attachment=True)
     if not REPORT_NAME.match(name) or not os.path.exists(os.path.join(REPORTS_DIR, name)):
         return jsonify({"error": "no such report"}), 404
     r = send_from_directory(REPORTS_DIR, name, mimetype="text/html", as_attachment=bool(request.args.get("download")))
@@ -2357,6 +2955,10 @@ def report_delete():
         os.remove(os.path.join(REPORTS_DIR, name))
     except FileNotFoundError:
         return jsonify({"error": "no such report"}), 404
+    try:
+        os.remove(os.path.join(REPORTS_DIR, name[:-5] + ".pdf"))
+    except FileNotFoundError:
+        pass
     return jsonify({"ok": True, "reports": report_list()})
 
 

@@ -43,6 +43,7 @@ Also: a background **network monitor** (internet / gateway / DNS samples, outage
 (on **Auto** it stays off while the Pi has a network and turns itself on after 2 minutes without one),
 a **setup wizard** on the first start of each day (company -> location -> Wi-Fi -> main page; companies and locations
 are remembered), **Finish Visit** (saves the site report on the Pi, clears the history; the next start shows the wizard again),
+**Share** for every report (save to a USB stick, email it as a PDF, or download it),
 a **one-day history** (kept through restarts and power-offs, emptied when a new day starts) so one report covers a visit,
 and a small **agent API** (hashed, scoped bearer tokens) so other automations can read the Pi's state.
 

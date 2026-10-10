@@ -14,9 +14,14 @@ names and targets). Anything else is refused with exit code 64.
   jarvis-priv ss                                   listening sockets (read only)
   jarvis-priv lldp <iface>                         LLDP/CDP neighbour summary
   jarvis-priv vlan-sniff <iface>                   6 s look for 802.1Q-tagged frames
+  jarvis-priv usb-list                             USB flash drives that reports can be saved to (JSON)
+  jarvis-priv usb-save <dev> <report>...           copy saved reports to a USB flash drive, then unmount it
 """
+import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 
 IFACE = re.compile(r"^[a-z][a-z0-9_.-]{0,14}$")
@@ -29,6 +34,67 @@ DHCP_ARGS = re.compile(r"^broadcast-dhcp-discover\.timeout=\d{1,3}$")
 
 class Refused(Exception):
     pass
+
+
+# ---- USB flash drives (Settings > Saved Reports > Share > Save to USB) -------------------------------------------
+# Only partitions (or whole disks) on the USB bus with FAT32 / exFAT: no symlinks, no device files, nothing executable
+# on those. They are mounted only for the copy (nosuid,nodev,noexec, at a fixed root-only place) and unmounted again.
+REPORTS_DIR = "/var/lib/jarvis-nettools/reports"
+REPORT_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{4}(-\d+)?_[A-Za-z0-9._-]{1,60}\.(html|pdf)$")
+USB_FS = ("vfat", "exfat")
+USB_MNT = "/run/jarvis-usb"
+USB_DIR = "JarvisReports"
+
+
+def lsblk():
+    out = subprocess.run(["/usr/bin/lsblk", "-J", "-b", "-o", "NAME,PATH,TRAN,TYPE,SIZE,FSTYPE,LABEL,VENDOR,MODEL,MOUNTPOINTS"],
+                         capture_output=True, text=True, timeout=10).stdout
+    return json.loads(out or "{}").get("blockdevices", [])
+
+
+def usb_targets(devices=None):
+    """[{dev, label, size, fstype, model}] for every FAT32/exFAT filesystem on a USB disk that is not mounted."""
+    found = []
+    for d in devices if devices is not None else lsblk():
+        if d.get("type") != "disk" or d.get("tran") != "usb":
+            continue
+        model = " ".join(x.strip() for x in (d.get("vendor") or "", d.get("model") or "") if x and x.strip())
+        for p in [d] + list(d.get("children") or []):
+            if p.get("fstype") in USB_FS and not any(m for m in (p.get("mountpoints") or []) if m):
+                found.append({"dev": p.get("path"), "label": p.get("label") or "", "size": int(p.get("size") or 0),
+                              "fstype": p.get("fstype"), "model": model})
+    return found
+
+
+def usb_save(dev, names, devices=None, run=subprocess.run, reports_dir=REPORTS_DIR, mnt=USB_MNT):
+    target = next((t for t in usb_targets(devices) if t["dev"] == dev), None)
+    if target is None:
+        raise Refused("not a USB flash drive that can be written (FAT32/exFAT, not mounted)")
+    if not names or len(names) > 20 or not all(REPORT_FILE.match(n) for n in names):
+        raise Refused("bad report name")
+    srcs = [os.path.join(reports_dir, n) for n in names]
+    for s in srcs:
+        if os.path.islink(s) or not os.path.isfile(s):
+            raise Refused("no such report")
+    os.makedirs(mnt, mode=0o700, exist_ok=True)
+    if os.path.ismount(mnt):                                    # left over from an interrupted copy
+        run(["/usr/bin/umount", mnt], capture_output=True, text=True, timeout=60)
+    opts = "nosuid,nodev,noexec,noatime" + (",utf8" if target["fstype"] == "vfat" else "")
+    r = run(["/usr/bin/mount", "-t", target["fstype"], "-o", opts, dev, mnt], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise Refused("could not open the USB drive: " + (r.stderr or "").strip()[:120])
+    copied = []
+    try:
+        dest = os.path.join(mnt, USB_DIR)
+        os.makedirs(dest, exist_ok=True)
+        for s, n in zip(srcs, names):
+            shutil.copyfile(s, os.path.join(dest, n))
+            copied.append(n)
+        os.sync()
+    finally:
+        u = run(["/usr/bin/umount", mnt], capture_output=True, text=True, timeout=60)
+    return {"ok": True, "copied": copied, "folder": USB_DIR, "label": target["label"], "model": target["model"],
+            "unmounted": u.returncode == 0}
 
 
 def _iface(v):
@@ -108,6 +174,21 @@ def build(argv):
 
 
 def main():
+    if sys.argv[1:2] in (["usb-list"], ["usb-save"]):          # done here (several steps), JSON on stdout
+        try:
+            if sys.argv[1:] == ["usb-list"]:
+                print(json.dumps(usb_targets()))
+                return 0
+            if sys.argv[1] == "usb-save" and len(sys.argv) >= 4:
+                print(json.dumps(usb_save(sys.argv[2], sys.argv[3:])))
+                return 0
+            raise Refused("usage: jarvis-priv usb-list | usb-save <dev> <report>...")
+        except Refused as e:
+            print(json.dumps({"ok": False, "error": str(e)}))
+            return 64
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            print(json.dumps({"ok": False, "error": "USB copy failed: %s" % e}))
+            return 1
     try:
         cmd, cwd = build(sys.argv[1:])
     except Refused as e:

@@ -32,11 +32,12 @@ await page.locator("#tool-seg button[data-tool=dns]").tap(); await page.locator(
 ok((await page.locator("#res-tools .res-out").textContent()).includes("Enter a host"), "tools: empty-target message in card");
 ok(await page.evaluate(() => document.querySelector("#res-tools").previousElementSibling.querySelector("#tool-start") !== null), "tools: card directly under the tool box");
 await page.fill("#target", "google.com"); await page.locator("#tool-start").tap(); await page.waitForTimeout(700);
-ok((await page.locator("#res-tools .res-title").textContent()) === "DNS Lookup google.com", "tools: title " + await page.locator("#res-tools .res-title").textContent());
-await page.locator("#btn-bw").tap(); await page.waitForTimeout(700);
-ok(await page.evaluate(() => document.querySelector("#res-tools").previousElementSibling.querySelector("#btn-bw") !== null), "tools: card moves under Quick Tests when a quick test is tapped");
-ok((await page.locator("#res-tools .res-title").textContent()) === "Bandwidth", "tools: title Bandwidth: " + await page.locator("#res-tools .res-title").textContent());
+ok((await page.locator("#res-tools .res-title").textContent()) === "DNS google.com", "tools: title " + await page.locator("#res-tools .res-title").textContent());
+await page.locator("#btn-pinggw2").tap(); await page.waitForTimeout(700);
+ok(await page.evaluate(() => document.querySelector("#res-tools").previousElementSibling.querySelector("#btn-pinggw2") !== null), "tools: card moves under Quick Tests when a quick test is tapped");
+ok((await page.locator("#res-tools .res-title").textContent()) === "Ping Gateway", "tools: title Ping Gateway: " + await page.locator("#res-tools .res-title").textContent());
 await shot("inline-tools");
+await page.waitForTimeout(2800);   // let the 10-ping Ping Gateway finish (while a live tool runs, Start means Stop)
 
 // live ping monitor: updates its own card; leaving the page doesn't leak output elsewhere; close doesn't get re-opened by live updates
 await page.locator("#tool-seg button[data-tool=monitor]").tap(); await page.locator("#tool-start").tap(); await page.waitForTimeout(900);
@@ -61,7 +62,8 @@ ok(clip.includes(" ttl ") || clip === "ERR", "copy puts result text on clipboard
 
 // LAN header Scan: card at top of page (no tapped section)
 await tab("network"); await page.locator("#hdr-actions button").tap(); await page.waitForTimeout(700);
-ok(await page.evaluate(() => document.querySelector("#page-network").firstElementChild.id === "res-network"), "lan: header action puts card at page top");
+await page.waitForTimeout(600);
+ok(await page.evaluate(() => !document.querySelector("#res-network:not(.hidden)") && document.querySelectorAll("#dev-list .dev-row").length > 0), "lan: header Scan fills the device list, no text card");
 
 // Settings: switch to Bottom console
 await tab("settings");

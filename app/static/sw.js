@@ -1,6 +1,6 @@
 // Minimal service worker — required for PWA installability.
 // App-shell cache only; API calls always go to the network (never cached).
-const CACHE = "nettools-v36";
+const CACHE = "nettools-v48";
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", (e) => {
